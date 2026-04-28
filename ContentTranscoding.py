@@ -3,6 +3,7 @@ import os
 import subprocess
 from pathlib import Path
 import numpy as np
+import pandas as pd
 import shutil
 
 
@@ -10,7 +11,6 @@ TARGET_EXTENSION = [".mp4"]
 FFMPEG = "ffmpeg"
 FFPROBE = "ffprobe"
 USING_CUDA = True
-VIDEO_ENCODER = "hevc_nvenc"
 
 THRESHOLD_PSNR = 42.0
 THRESHOLD_SSIM = 0.93
@@ -21,7 +21,7 @@ class ContentTranscoding:
         self.args = args
         self.temp_path = None
         self.done_path = None
-        
+
     def __prepare(self, target_path):
         self.temp_path = Path(target_path) / "temporary"
         if os.path.isdir(self.temp_path) == False:
@@ -38,7 +38,7 @@ class ContentTranscoding:
             file = target_path.glob(f"*{ext}")
             for x in file:
                 target_files.append(x)
-        return target_files        
+        return target_files
 
     def __transcoding(self, target_file, video_bitrate):
         if USING_CUDA == True:
@@ -88,7 +88,7 @@ class ContentTranscoding:
                         if ':' in part:
                             key, value = part.split(':', 1)
                             line_dict[key] = value
-                    
+
                     if 'psnr_avg' in line_dict and 'psnr_y' in line_dict:
                         parsed_data.append({
                             'frame': int(line_dict.get('n', 0)),
@@ -126,14 +126,14 @@ class ContentTranscoding:
         except FileNotFoundError:
             print("Can't find psnr_report.txt. please check path.")
             avg_psnr_avg, avg_psnr_y = 0, 0
-        
+
         return avg_psnr_avg, avg_psnr_y, avg_ssim_all, avg_ssim_y
-    
+
     def list_up_already_measured_files(self):
         empty_files = [f for f in self.temp_path.iterdir() if f.is_file() and f.stat().st_size == 0]
         for rm_file in empty_files:
             rm_file.unlink(missing_ok=True)
-        
+
         txt_files = self.temp_path.glob("*.txt")
         mp4_files = self.temp_path.glob("*.mp4")
 
@@ -151,7 +151,64 @@ class ContentTranscoding:
                 already_measured_files.append(x.name)
 
         return already_measured_files
-    
+
+    def __remove_files(self, target_files):
+        for x in target_files:
+            x.unlink(missing_ok=True)
+
+    def __gethering_measured_data(self):
+        mp4_files = self.temp_path.glob("*.mp4")
+        all_measured_files = []
+        results = []
+        for x in mp4_files:
+            psnr_file = x.with_name(f"{x.name}_psnr.txt")
+            ssim_file = x.with_name(f"{x.name}_ssim.txt")
+            all_measured_files.append(psnr_file)
+            all_measured_files.append(ssim_file)
+            avg_psnr_avg, avg_psnr_y, avg_ssim_all, avg_ssim_y = self.__parsing_psnr_ssim(psnr_file, ssim_file)
+            new_data = {
+                'file_name': x.name,
+                'psnr_avg': avg_psnr_avg,
+                'psnr_y': avg_psnr_y,
+                'ssim_all': avg_ssim_all,
+                'ssim_y': avg_ssim_y
+            }
+            results.append(new_data)
+
+        df = pd.DataFrame(results)
+        dst_path_file = self.done_path / "measured_data.csv"
+        count = 0
+        while True:
+            if os.path.isfile(dst_path_file):
+                dst_path_file = self.done_path / f"measured_data_{count}.csv"
+                count += 1
+            else:
+                break
+
+        try:
+            df.to_csv(dst_path_file, index=False)
+            print(f"[S] Saved to {dst_path_file}")
+            self.__remove_files(all_measured_files)
+        except Exception as e:
+            print(f"[E] Failed to save to {dst_path_file}")
+            return False
+        return True
+
+    def __move_transcoded_files(self):
+        mp4_files = self.temp_path.glob("*.mp4")
+        fail_count = 0
+        for file in mp4_files:
+            try:
+                shutil.move(str(file), self.done_path)
+            except Exception as e:
+                print(f"[E] Failed to move {file} to {self.done_path}")
+                fail_count += 1
+
+        if fail_count == 0:
+            print(f"[S] Move all transcoded files to {self.done_path}")
+        else:
+            print(f"[E] Failed to move {fail_count} files to {self.done_path}")
+
     def __run_transcoding(self, target_files):
         already_measured_files = self.list_up_already_measured_files()
 
@@ -181,14 +238,17 @@ class ContentTranscoding:
                     transcoded_file.unlink(missing_ok=True)
                     psnr_report.unlink(missing_ok=True)
                     ssim_report.unlink(missing_ok=True)
-                    
+
             except subprocess.CalledProcessError:
                 print("[Error] Failed to get bitrate of the video file = {}".format(cur_file))
-            
+
     def run(self):
+
         self.__prepare(self.args.path)
         target_files = self.__gethering_target_files()
         self.__run_transcoding(target_files)
+        if self.__gethering_measured_data() == True:
+            self.__move_transcoded_files()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
