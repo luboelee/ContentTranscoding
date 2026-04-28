@@ -82,7 +82,7 @@ class ContentTranscoding:
             with open(psnr_report, 'r', encoding='utf-8') as file:
                 for line in file:
                     parts = line.strip().split()
-                    
+
                     line_dict = {}
                     for part in parts:
                         if ':' in part:
@@ -105,13 +105,13 @@ class ContentTranscoding:
             with open(ssim_report, 'r', encoding='utf-8') as file:
                 for line in file:
                     parts = line.strip().split()
-                    
                     line_dict = {}
+
                     for part in parts:
                         if ':' in part:
                             key, value = part.split(':', 1)
                             line_dict[key] = value
-                    
+
                     if 'All' in line_dict and 'Y' in line_dict:
                         parsed_data.append({
                             'frame': int(line_dict.get('n', 0)),
@@ -129,10 +129,38 @@ class ContentTranscoding:
         
         return avg_psnr_avg, avg_psnr_y, avg_ssim_all, avg_ssim_y
     
+    def list_up_already_measured_files(self):
+        empty_files = [f for f in self.temp_path.iterdir() if f.is_file() and f.stat().st_size == 0]
+        for rm_file in empty_files:
+            rm_file.unlink(missing_ok=True)
+        
+        txt_files = self.temp_path.glob("*.txt")
+        mp4_files = self.temp_path.glob("*.mp4")
+
+        measured_txt_files = []
+        for x in txt_files:
+            pos = x.name.find("_psnr.txt")
+            if pos == -1:
+                pos = x.name.find("_ssim.txt")
+            if pos > 0 and x.name[:pos] not in measured_txt_files:
+                measured_txt_files.append(x.name[:pos])
+
+        already_measured_files = []
+        for x in mp4_files:
+            if x.name in measured_txt_files and x.stat().st_size > 0:
+                already_measured_files.append(x.name)
+
+        return already_measured_files
+    
     def __run_transcoding(self, target_files):
+        already_measured_files = self.list_up_already_measured_files()
+
         for cur_file in target_files:
-            cmd_get_bitrate = f"{FFPROBE} -v error -show_entries format=bit_rate -of default=noprint_wrappers=1:nokey=1 {cur_file}"
+            if cur_file.name in already_measured_files:
+                print(f"[Skip] {cur_file.name}. because already measured")
+                continue
             try:
+                cmd_get_bitrate = f"{FFPROBE} -v error -show_entries format=bit_rate -of default=noprint_wrappers=1:nokey=1 {cur_file}"
                 orig_video_bitrate = subprocess.check_output(cmd_get_bitrate, shell=True).decode("utf-8").strip()
                 transcoding_done = False
                 for ratio in COMPRESS_RATIO:
@@ -161,7 +189,6 @@ class ContentTranscoding:
         self.__prepare(self.args.path)
         target_files = self.__gethering_target_files()
         self.__run_transcoding(target_files)
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
