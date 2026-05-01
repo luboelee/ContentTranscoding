@@ -227,7 +227,9 @@ class ContentTranscoding:
     def __run_transcoding(self, target_files):
         already_measured_files = self.list_up_already_measured_files()
 
+        count = 0
         for cur_file in target_files:
+            count += 1
             if cur_file.name in already_measured_files:
                 print(f"[Skip] {cur_file.name}. because already measured")
                 test_file_size = [cur_file, self.temp_path / cur_file.name]
@@ -239,7 +241,7 @@ class ContentTranscoding:
                 transcoding_done = False
                 for ratio in COMPRESS_RATIO:
                     video_bitrate = int(orig_video_bitrate) * ratio
-                    print(f"Transcoding the video file = {cur_file} and original bitrate = {orig_video_bitrate}, target bitrate = {video_bitrate}")
+                    print(f"[{count}/{len(target_files)}] Transcoding the video file = {cur_file} and original bitrate = {orig_video_bitrate}, target bitrate = {video_bitrate}")
                     transcoded_file = self.__transcoding(cur_file, video_bitrate)
                     if transcoded_file == None:
                         continue
