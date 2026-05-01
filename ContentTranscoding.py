@@ -12,7 +12,7 @@ FFMPEG = "ffmpeg"
 FFPROBE = "ffprobe"
 USING_CUDA = True
 
-THRESHOLD_PSNR = 42.0
+THRESHOLD_PSNR = 40.0
 THRESHOLD_SSIM = 0.93
 COMPRESS_RATIO = [0.6, 0.7, 0.8, 0.9]
 
@@ -21,6 +21,7 @@ class ContentTranscoding:
         self.args = args
         self.temp_path = None
         self.done_path = None
+        self.orig_target_file_size = []
 
     def __prepare(self, target_path):
         self.temp_path = Path(target_path) / "temporary"
@@ -127,7 +128,7 @@ class ContentTranscoding:
             print("Can't find psnr_report.txt. please check path.")
             avg_psnr_avg, avg_psnr_y = 0, 0
 
-        return avg_psnr_avg, avg_psnr_y, avg_ssim_all, avg_ssim_y
+        return np.round(avg_psnr_avg, 3), np.round(avg_psnr_y, 3), np.round(avg_ssim_all, 6), np.round(avg_ssim_y, 6)
 
     def list_up_already_measured_files(self):
         empty_files = [f for f in self.temp_path.iterdir() if f.is_file() and f.stat().st_size == 0]
@@ -156,22 +157,33 @@ class ContentTranscoding:
         for x in target_files:
             x.unlink(missing_ok=True)
 
+    def __get_original_transcoded_file_size(self, transcoded_file):
+        for x in self.orig_target_file_size:
+            if x[1] == transcoded_file:
+                return x[0].stat().st_size, x[1].stat().st_size
+        return 1, 1
+
     def __gethering_measured_data(self):
-        mp4_files = self.temp_path.glob("*.mp4")
+
+        transcoded_mp4_files = self.temp_path.glob("*.mp4")
         all_measured_files = []
         results = []
-        for x in mp4_files:
-            psnr_file = x.with_name(f"{x.name}_psnr.txt")
-            ssim_file = x.with_name(f"{x.name}_ssim.txt")
+        for transcoded_file in transcoded_mp4_files:
+            psnr_file = transcoded_file.with_name(f"{transcoded_file.name}_psnr.txt")
+            ssim_file = transcoded_file.with_name(f"{transcoded_file.name}_ssim.txt")
             all_measured_files.append(psnr_file)
             all_measured_files.append(ssim_file)
             avg_psnr_avg, avg_psnr_y, avg_ssim_all, avg_ssim_y = self.__parsing_psnr_ssim(psnr_file, ssim_file)
+            orig_file_size, trans_file_size = self.__get_original_transcoded_file_size(transcoded_file)
             new_data = {
-                'file_name': x.name,
+                'file_name': transcoded_file.name,
                 'psnr_avg': avg_psnr_avg,
                 'psnr_y': avg_psnr_y,
                 'ssim_all': avg_ssim_all,
-                'ssim_y': avg_ssim_y
+                'ssim_y': avg_ssim_y,
+                "orig_file_size": orig_file_size,
+                "trans_file_size": trans_file_size,
+                "ratio": trans_file_size / orig_file_size
             }
             results.append(new_data)
 
@@ -209,12 +221,17 @@ class ContentTranscoding:
         else:
             print(f"[E] Failed to move {fail_count} files to {self.done_path}")
 
+        if not any(self.temp_path.iterdir()):
+            self.temp_path.rmdir()
+
     def __run_transcoding(self, target_files):
         already_measured_files = self.list_up_already_measured_files()
 
         for cur_file in target_files:
             if cur_file.name in already_measured_files:
                 print(f"[Skip] {cur_file.name}. because already measured")
+                test_file_size = [cur_file, self.temp_path / cur_file.name]
+                self.orig_target_file_size.append(test_file_size)
                 continue
             try:
                 cmd_get_bitrate = f"{FFPROBE} -v error -show_entries format=bit_rate -of default=noprint_wrappers=1:nokey=1 {cur_file}"
@@ -231,6 +248,8 @@ class ContentTranscoding:
                     if avg_psnr_avg > THRESHOLD_PSNR and avg_psnr_y > THRESHOLD_PSNR and avg_ssim_all > THRESHOLD_SSIM and avg_ssim_y > THRESHOLD_SSIM:
                         print(f"[✔] Done transcoding. Avg PSNR: {avg_psnr_avg}, Avg PSNR Y: {avg_psnr_y}, Avg SSIM All: {avg_ssim_all}, Avg SSIM Y: {avg_ssim_y}")
                         transcoding_done = True
+                        test_file_size = [cur_file, transcoded_file]
+                        self.orig_target_file_size.append(test_file_size)
                         break
                     else:
                         print(f"[✘] Substandard video quality: Avg PSNR: {avg_psnr_avg}/{THRESHOLD_PSNR}, Avg PSNR Y: {avg_psnr_y}/{THRESHOLD_PSNR}, Avg SSIM All: {avg_ssim_all}/{THRESHOLD_SSIM}, Avg SSIM Y: {avg_ssim_y}/{THRESHOLD_SSIM}")
