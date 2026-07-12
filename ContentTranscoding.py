@@ -52,29 +52,32 @@ class ContentTranscoding:
         transcoded_file = self.temp_path / target_file.name
         cmd = f"{FFMPEG} -y -loglevel error {using_hwaccel} -i {target_file} -b:v {video_bitrate} -c:v {video_encoder} -c:a copy {transcoded_file}"
         try:
-            subprocess.call(cmd, shell=True)
+            subprocess.run(cmd, shell=True, check=True)
         except subprocess.CalledProcessError:
             print(f"[Error] Failed to transcode the video file = {target_file} and bitrate = {video_bitrate}")
-            transcoded_file = None
+            return None
+
+        if not transcoded_file.is_file() or transcoded_file.stat().st_size == 0:
+            return None
+
         return transcoded_file
 
     def __measuring(self, anchor_file, target_file):
         if target_file == None:
-            return
+            return None, None
 
         psnr_report = f"{target_file.name}_psnr.txt"
         ssim_report = f"{target_file.name}_ssim.txt"
         cmd = f'{FFMPEG} -loglevel error -i {anchor_file} -i {target_file} -filter_complex \"[1:v:0]split=2[ref1][ref2];[0:v:0][ref1]psnr=f={str(psnr_report)}[v_pass];[v_pass][ref2]ssim=f={str(ssim_report)}\" -f null -'
         try:
-            subprocess.call(cmd, shell=True)
+            subprocess.run(cmd, shell=True, check=True)
             moved_psnr_path_file = self.temp_path / psnr_report
             moved_ssim_path_file = self.temp_path / ssim_report
             shutil.move(psnr_report, moved_psnr_path_file)
             shutil.move(ssim_report, moved_ssim_path_file)
         except subprocess.CalledProcessError:
             print(f"[Error] Failed to measure the video file = {target_file}")
-            moved_psnr_path_file = None
-            moved_ssim_path_file = None
+            return None, None
         return moved_psnr_path_file, moved_ssim_path_file
 
     def __parsing_psnr_ssim(self, psnr_report, ssim_report):
@@ -124,16 +127,19 @@ class ContentTranscoding:
             ssim_y_list = [data['ssim_y'] for data in parsed_data]
             avg_ssim_all = np.mean(ssim_all_list)
             avg_ssim_y = np.mean(ssim_y_list)
-        except FileNotFoundError:
-            print("Can't find psnr_report.txt. please check path.")
-            avg_psnr_avg, avg_psnr_y = 0, 0
+        except (FileNotFoundError, OSError, ValueError) as error:
+            print(f"[Error] Failed to parse metric reports: {error}")
+            avg_psnr_avg, avg_psnr_y, avg_ssim_all, avg_ssim_y = 0.0, 0.0, 0.0, 0.0
 
         return np.round(avg_psnr_avg, 3), np.round(avg_psnr_y, 3), np.round(avg_ssim_all, 6), np.round(avg_ssim_y, 6)
 
-    def list_up_already_measured_files(self):
+    def _remove_empty_files(self):
         empty_files = [f for f in self.temp_path.iterdir() if f.is_file() and f.stat().st_size == 0]
         for rm_file in empty_files:
             rm_file.unlink(missing_ok=True)
+
+    def list_up_already_measured_files(self):
+        self._remove_empty_files()
 
         txt_files = self.temp_path.glob("*.txt")
         mp4_files = self.temp_path.glob("*.mp4")
@@ -164,7 +170,6 @@ class ContentTranscoding:
         return 1, 1
 
     def __gethering_measured_data(self):
-
         transcoded_mp4_files = self.temp_path.glob("*.mp4")
         all_measured_files = []
         results = []
@@ -246,6 +251,9 @@ class ContentTranscoding:
                     if transcoded_file == None:
                         continue
                     psnr_report, ssim_report = self.__measuring(cur_file, transcoded_file)
+                    if psnr_report is None or ssim_report is None:
+                        transcoded_file.unlink(missing_ok=True)
+                        continue
                     avg_psnr_avg, avg_psnr_y, avg_ssim_all, avg_ssim_y = self.__parsing_psnr_ssim(psnr_report, ssim_report)
                     if avg_psnr_avg > THRESHOLD_PSNR and avg_psnr_y > THRESHOLD_PSNR and avg_ssim_all > THRESHOLD_SSIM and avg_ssim_y > THRESHOLD_SSIM:
                         print(f"[✔] Done transcoding. Avg PSNR: {avg_psnr_avg}, Avg PSNR Y: {avg_psnr_y}, Avg SSIM All: {avg_ssim_all}, Avg SSIM Y: {avg_ssim_y}")
@@ -273,8 +281,23 @@ class ContentTranscoding:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("-p", "--path", required=True, help="Path to the video file")
+    parser.add_argument("-p", "--path", help="Path to the video file")
+    parser.add_argument("--psnr", default=THRESHOLD_PSNR, type=float, help="Threshold of PSNR")
+    parser.add_argument("--ssim", default=THRESHOLD_SSIM, type=float, help="Threshold of SSIM")
+    parser.add_argument("-t", "--threshold", action="store_true", help="Show threshold of PSNR and SSIM")
     args = parser.parse_args()
+    if args.psnr != THRESHOLD_PSNR:
+        THRESHOLD_PSNR = args.psnr
+    if args.ssim != THRESHOLD_SSIM:
+        THRESHOLD_SSIM = args.ssim
+
+    if args.threshold:
+        print(f"Threshold of PSNR: {THRESHOLD_PSNR}, Threshold of SSIM: {THRESHOLD_SSIM}")
+        exit(0)
+
+    if args.path == None:
+        parser.print_help()
+        exit(0)
 
     content_transcoding = ContentTranscoding(args)
     content_transcoding.run()
