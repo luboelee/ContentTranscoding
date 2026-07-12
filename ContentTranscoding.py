@@ -25,15 +25,16 @@ class ContentTranscoding:
 
     def __prepare(self, target_path):
         self.temp_path = Path(target_path) / "temporary"
-        if os.path.isdir(self.temp_path) == False:
-            os.mkdir(self.temp_path)
+        self.temp_path.mkdir(parents=True, exist_ok=True)
 
         self.done_path = Path(target_path) / "done"
-        if os.path.isdir(self.done_path) == False:
-            os.mkdir(self.done_path)
+        self.done_path.mkdir(parents=True, exist_ok=True)
 
     def __gethering_target_files(self):
         target_path = Path(self.args.path)
+        if not target_path.is_dir():
+            raise ValueError(f"Invalid target directory: {target_path}")
+
         target_files = []
         for ext in TARGET_EXTENSION:
             file = target_path.glob(f"*{ext}")
@@ -188,7 +189,7 @@ class ContentTranscoding:
                 'ssim_y': avg_ssim_y,
                 "orig_file_size": orig_file_size,
                 "trans_file_size": trans_file_size,
-                "ratio": trans_file_size / orig_file_size
+                "ratio": round(trans_file_size / orig_file_size, 2)
             }
             results.append(new_data)
 
@@ -241,11 +242,21 @@ class ContentTranscoding:
                 self.orig_target_file_size.append(test_file_size)
                 continue
             try:
-                cmd_get_bitrate = f"{FFPROBE} -v error -show_entries format=bit_rate -of default=noprint_wrappers=1:nokey=1 {cur_file}"
-                orig_video_bitrate = subprocess.check_output(cmd_get_bitrate, shell=True).decode("utf-8").strip()
+                cmd_get_bitrate = [
+                    FFPROBE,
+                    "-v", "error",
+                    "-select_streams", "v:0",
+                    "-show_entries", "stream=bit_rate",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    str(cur_file),
+                ]
+                orig_video_bitrate = subprocess.check_output(
+                    cmd_get_bitrate,
+                    text=True,
+                ).strip()
                 transcoding_done = False
                 for ratio in COMPRESS_RATIO:
-                    video_bitrate = int(orig_video_bitrate) * ratio
+                    video_bitrate = round(int(orig_video_bitrate) * ratio)
                     print(f"[{count}/{len(target_files)}] Transcoding the video file = {cur_file} and original bitrate = {orig_video_bitrate}, target bitrate = {video_bitrate}")
                     transcoded_file = self.__transcoding(cur_file, video_bitrate)
                     if transcoded_file == None:
