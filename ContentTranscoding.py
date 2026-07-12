@@ -170,6 +170,46 @@ class ContentTranscoding:
                 return x[0].stat().st_size, x[1].stat().st_size
         return 1, 1
 
+    def __save_to_csv(self, df):
+        dst_path_file = self.done_path / "measured_data.csv"
+        count = 0
+        while True:
+            if os.path.isfile(dst_path_file):
+                dst_path_file = self.done_path / f"measured_data_{count}.csv"
+                count += 1
+            else:
+                break
+
+        try:
+            df.to_csv(dst_path_file, index=False)
+            print(f"[S] Saved to {dst_path_file}")
+        except Exception as e:
+            print(f"[E] Failed to save to {dst_path_file}")
+            return False
+        return True
+
+    def __save_to_json(self, df):
+        dst_path_file = self.done_path / "measured_data.json"
+        count = 0
+        while True:
+            if os.path.isfile(dst_path_file):
+                dst_path_file = self.done_path / f"measured_data_{count}.json"
+                count += 1
+            else:
+                break
+
+        try:
+            df.to_json(dst_path_file,
+                        orient="records",
+                        indent=4,
+                        force_ascii=False)
+
+            print(f"[S] Saved to {dst_path_file}")
+        except Exception as e:
+            print(f"[E] Failed to save to {dst_path_file}")
+            return False
+        return True
+
     def __gethering_measured_data(self):
         transcoded_mp4_files = self.temp_path.glob("*.mp4")
         all_measured_files = []
@@ -194,22 +234,9 @@ class ContentTranscoding:
             results.append(new_data)
 
         df = pd.DataFrame(results)
-        dst_path_file = self.done_path / "measured_data.csv"
-        count = 0
-        while True:
-            if os.path.isfile(dst_path_file):
-                dst_path_file = self.done_path / f"measured_data_{count}.csv"
-                count += 1
-            else:
-                break
-
-        try:
-            df.to_csv(dst_path_file, index=False)
-            print(f"[S] Saved to {dst_path_file}")
-            self.__remove_files(all_measured_files)
-        except Exception as e:
-            print(f"[E] Failed to save to {dst_path_file}")
-            return False
+        self.__save_to_csv(df)
+        self.__save_to_json(df)
+        self.__remove_files(all_measured_files)
         return True
 
     def __move_transcoded_files(self):
