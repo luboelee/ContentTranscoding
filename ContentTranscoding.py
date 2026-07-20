@@ -1,341 +1,451 @@
 import argparse
-import os
-import subprocess
-from pathlib import Path
-import numpy as np
-import pandas as pd
 import shutil
+import subprocess
+from dataclasses import dataclass
+from pathlib import Path
+from statistics import fmean
+from typing import Iterable, Sequence
+
+import pandas as pd
 
 
-TARGET_EXTENSION = [".mp4"]
+TARGET_EXTENSIONS = frozenset({".mp4"})
 FFMPEG = "ffmpeg"
 FFPROBE = "ffprobe"
 USING_CUDA = True
 
 THRESHOLD_PSNR = 40.0
 THRESHOLD_SSIM = 0.93
-COMPRESS_RATIO = [0.6, 0.7, 0.8, 0.9]
+COMPRESS_RATIOS = (0.6, 0.7, 0.8, 0.9)
+RESULT_COLUMNS = (
+    "file_name",
+    "psnr_avg",
+    "psnr_y",
+    "ssim_all",
+    "ssim_y",
+    "orig_file_size",
+    "trans_file_size",
+    "ratio",
+)
+
+
+@dataclass(frozen=True)
+class QualityMetrics:
+    psnr_avg: float
+    psnr_y: float
+    ssim_all: float
+    ssim_y: float
+
+    @classmethod
+    def empty(cls) -> "QualityMetrics":
+        return cls(0.0, 0.0, 0.0, 0.0)
+
+    def meets(self, psnr_threshold: float, ssim_threshold: float) -> bool:
+        return (
+            self.psnr_avg > psnr_threshold
+            and self.psnr_y > psnr_threshold
+            and self.ssim_all > ssim_threshold
+            and self.ssim_y > ssim_threshold
+        )
+
 
 class ContentTranscoding:
-    def __init__(self, args):
-        self.args = args
-        self.temp_path = None
-        self.done_path = None
-        self.orig_target_file_size = []
+    def __init__(self, args: argparse.Namespace):
+        if args is None or not getattr(args, "path", None):
+            raise ValueError("A target path is required")
 
-    def __prepare(self, target_path):
-        self.temp_path = Path(target_path) / "temporary"
+        self.target_path = Path(args.path)
+        self.psnr_threshold = float(getattr(args, "psnr", THRESHOLD_PSNR))
+        self.ssim_threshold = float(getattr(args, "ssim", THRESHOLD_SSIM))
+        self.use_cuda = bool(getattr(args, "use_cuda", USING_CUDA))
+        self.temp_path = self.target_path / "temporary"
+        self.done_path = self.target_path / "done"
+        self._source_files: dict[Path, Path] = {}
+
+    def _prepare_directories(self) -> None:
+        if not self.target_path.is_dir():
+            raise ValueError(f"Invalid target directory: {self.target_path}")
         self.temp_path.mkdir(parents=True, exist_ok=True)
-
-        self.done_path = Path(target_path) / "done"
         self.done_path.mkdir(parents=True, exist_ok=True)
 
-    def __gethering_target_files(self):
-        target_path = Path(self.args.path)
-        if not target_path.is_dir():
-            raise ValueError(f"Invalid target directory: {target_path}")
+    def _gather_target_files(self) -> list[Path]:
+        return sorted(
+            path
+            for path in self.target_path.iterdir()
+            if path.is_file() and path.suffix.lower() in TARGET_EXTENSIONS
+        )
 
-        target_files = []
-        for ext in TARGET_EXTENSION:
-            file = target_path.glob(f"*{ext}")
-            for x in file:
-                target_files.append(x)
-        return target_files
+    def _build_transcode_command(
+        self, target_file: Path, transcoded_file: Path, video_bitrate: int
+    ) -> list[str]:
+        command = [FFMPEG, "-y", "-loglevel", "error"]
+        if self.use_cuda:
+            command.extend(("-hwaccel", "cuda"))
 
-    def __transcoding(self, target_file, video_bitrate):
-        if USING_CUDA == True:
-            video_encoder = "hevc_nvenc"
-            using_hwaccel = "-hwaccel cuda"
-        else:
-            video_encoder = "libx265"
-            using_hwaccel = ""
+        encoder = "hevc_nvenc" if self.use_cuda else "libx265"
+        command.extend(
+            (
+                "-i",
+                str(target_file),
+                "-b:v",
+                str(video_bitrate),
+                "-c:v",
+                encoder,
+                "-c:a",
+                "copy",
+                str(transcoded_file),
+            )
+        )
+        return command
 
+    def _transcode(self, target_file: Path, video_bitrate: int) -> Path | None:
         transcoded_file = self.temp_path / target_file.name
-        cmd = f"{FFMPEG} -y -loglevel error {using_hwaccel} -i {target_file} -b:v {video_bitrate} -c:v {video_encoder} -c:a copy {transcoded_file}"
+        transcoded_file.unlink(missing_ok=True)
+        command = self._build_transcode_command(
+            target_file, transcoded_file, video_bitrate
+        )
+
         try:
-            subprocess.run(cmd, shell=True, check=True)
-        except subprocess.CalledProcessError:
-            print(f"[Error] Failed to transcode the video file = {target_file} and bitrate = {video_bitrate}")
+            subprocess.run(command, check=True)
+        except (OSError, subprocess.CalledProcessError) as error:
+            transcoded_file.unlink(missing_ok=True)
+            print(
+                "[Error] Failed to transcode "
+                f"{target_file} at bitrate {video_bitrate}: {error}"
+            )
             return None
 
-        if not transcoded_file.is_file() or transcoded_file.stat().st_size == 0:
+        if not self._is_nonempty_file(transcoded_file):
+            transcoded_file.unlink(missing_ok=True)
             return None
-
         return transcoded_file
 
-    def __measuring(self, anchor_file, target_file):
-        if target_file == None:
+    def _metric_report_paths(self, target_file: Path) -> tuple[Path, Path]:
+        return (
+            self.temp_path / f"{target_file.name}_psnr.txt",
+            self.temp_path / f"{target_file.name}_ssim.txt",
+        )
+
+    def _measure(
+        self, anchor_file: Path, target_file: Path | None
+    ) -> tuple[Path | None, Path | None]:
+        if target_file is None:
             return None, None
 
-        psnr_report = f"{target_file.name}_psnr.txt"
-        ssim_report = f"{target_file.name}_ssim.txt"
-        cmd = f'{FFMPEG} -loglevel error -i {anchor_file} -i {target_file} -filter_complex \"[1:v:0]split=2[ref1][ref2];[0:v:0][ref1]psnr=f={str(psnr_report)}[v_pass];[v_pass][ref2]ssim=f={str(ssim_report)}\" -f null -'
+        psnr_report, ssim_report = self._metric_report_paths(target_file)
+        self._remove_files((psnr_report, ssim_report))
+        filter_graph = (
+            "[1:v:0]split=2[ref1][ref2];"
+            f"[0:v:0][ref1]psnr=f={psnr_report.name}[v_pass];"
+            f"[v_pass][ref2]ssim=f={ssim_report.name}"
+        )
+        command = [
+            FFMPEG,
+            "-loglevel",
+            "error",
+            "-i",
+            str(anchor_file.resolve()),
+            "-i",
+            str(target_file.resolve()),
+            "-filter_complex",
+            filter_graph,
+            "-f",
+            "null",
+            "-",
+        ]
+
         try:
-            subprocess.run(cmd, shell=True, check=True)
-            moved_psnr_path_file = self.temp_path / psnr_report
-            moved_ssim_path_file = self.temp_path / ssim_report
-            shutil.move(psnr_report, moved_psnr_path_file)
-            shutil.move(ssim_report, moved_ssim_path_file)
-        except subprocess.CalledProcessError:
-            print(f"[Error] Failed to measure the video file = {target_file}")
+            subprocess.run(command, check=True, cwd=self.temp_path)
+        except (OSError, subprocess.CalledProcessError) as error:
+            self._remove_files((psnr_report, ssim_report))
+            print(f"[Error] Failed to measure {target_file}: {error}")
             return None, None
-        return moved_psnr_path_file, moved_ssim_path_file
 
-    def __parsing_psnr_ssim(self, psnr_report, ssim_report):
+        if not all(self._is_nonempty_file(path) for path in (psnr_report, ssim_report)):
+            self._remove_files((psnr_report, ssim_report))
+            return None, None
+        return psnr_report, ssim_report
+
+    @staticmethod
+    def _parse_report(report: Path, field_names: Sequence[str]) -> tuple[float, ...]:
+        values = {field_name: [] for field_name in field_names}
+        with report.open("r", encoding="utf-8") as file:
+            for line in file:
+                fields = {}
+                for part in line.split():
+                    key, separator, value = part.partition(":")
+                    if separator:
+                        fields[key] = value
+
+                if all(field_name in fields for field_name in field_names):
+                    for field_name in field_names:
+                        values[field_name].append(float(fields[field_name]))
+
+        if not all(values.values()):
+            raise ValueError(f"No metric data found in {report}")
+        return tuple(fmean(values[field_name]) for field_name in field_names)
+
+    def _parse_metrics(self, psnr_report: Path, ssim_report: Path) -> QualityMetrics:
         try:
-            parsed_data = []
-            with open(psnr_report, 'r', encoding='utf-8') as file:
-                for line in file:
-                    parts = line.strip().split()
-
-                    line_dict = {}
-                    for part in parts:
-                        if ':' in part:
-                            key, value = part.split(':', 1)
-                            line_dict[key] = value
-
-                    if 'psnr_avg' in line_dict and 'psnr_y' in line_dict:
-                        parsed_data.append({
-                            'frame': int(line_dict.get('n', 0)),
-                            'psnr_avg': float(line_dict['psnr_avg']),
-                            'psnr_y': float(line_dict['psnr_y'])
-                        })
-
-            psnr_avg_list = [data['psnr_avg'] for data in parsed_data]
-            psnr_y_list = [data['psnr_y'] for data in parsed_data]
-            avg_psnr_avg = np.mean(psnr_avg_list)
-            avg_psnr_y = np.mean(psnr_y_list)
-
-            parsed_data.clear()
-            with open(ssim_report, 'r', encoding='utf-8') as file:
-                for line in file:
-                    parts = line.strip().split()
-                    line_dict = {}
-
-                    for part in parts:
-                        if ':' in part:
-                            key, value = part.split(':', 1)
-                            line_dict[key] = value
-
-                    if 'All' in line_dict and 'Y' in line_dict:
-                        parsed_data.append({
-                            'frame': int(line_dict.get('n', 0)),
-                            'ssim_all': float(line_dict['All']),
-                            'ssim_y': float(line_dict['Y'])
-                        })
-
-            ssim_all_list = [data['ssim_all'] for data in parsed_data]
-            ssim_y_list = [data['ssim_y'] for data in parsed_data]
-            avg_ssim_all = np.mean(ssim_all_list)
-            avg_ssim_y = np.mean(ssim_y_list)
-        except (FileNotFoundError, OSError, ValueError) as error:
+            psnr_avg, psnr_y = self._parse_report(
+                psnr_report, ("psnr_avg", "psnr_y")
+            )
+            ssim_all, ssim_y = self._parse_report(ssim_report, ("All", "Y"))
+        except (OSError, ValueError) as error:
             print(f"[Error] Failed to parse metric reports: {error}")
-            avg_psnr_avg, avg_psnr_y, avg_ssim_all, avg_ssim_y = 0.0, 0.0, 0.0, 0.0
+            return QualityMetrics.empty()
 
-        return np.round(avg_psnr_avg, 3), np.round(avg_psnr_y, 3), np.round(avg_ssim_all, 6), np.round(avg_ssim_y, 6)
+        return QualityMetrics(
+            psnr_avg=round(psnr_avg, 3),
+            psnr_y=round(psnr_y, 3),
+            ssim_all=round(ssim_all, 6),
+            ssim_y=round(ssim_y, 6),
+        )
 
-    def _remove_empty_files(self):
-        empty_files = [f for f in self.temp_path.iterdir() if f.is_file() and f.stat().st_size == 0]
-        for rm_file in empty_files:
-            rm_file.unlink(missing_ok=True)
+    @staticmethod
+    def _is_nonempty_file(path: Path) -> bool:
+        return path.is_file() and path.stat().st_size > 0
 
-    def list_up_already_measured_files(self):
+    def _remove_empty_files(self) -> None:
+        for path in self.temp_path.iterdir():
+            if path.is_file() and path.stat().st_size == 0:
+                path.unlink(missing_ok=True)
+
+    def list_already_measured_files(self) -> set[str]:
         self._remove_empty_files()
+        measured_files = set()
+        for transcoded_file in self.temp_path.iterdir():
+            if not (
+                transcoded_file.is_file()
+                and transcoded_file.suffix.lower() in TARGET_EXTENSIONS
+            ):
+                continue
+            reports = self._metric_report_paths(transcoded_file)
+            if all(self._is_nonempty_file(report) for report in reports):
+                measured_files.add(transcoded_file.name)
+        return measured_files
 
-        txt_files = self.temp_path.glob("*.txt")
-        mp4_files = self.temp_path.glob("*.mp4")
+    # Backward-compatible alias for callers using the previous public name.
+    def list_up_already_measured_files(self) -> list[str]:
+        return sorted(self.list_already_measured_files())
 
-        measured_txt_files = []
-        for x in txt_files:
-            pos = x.name.find("_psnr.txt")
-            if pos == -1:
-                pos = x.name.find("_ssim.txt")
-            if pos > 0 and x.name[:pos] not in measured_txt_files:
-                measured_txt_files.append(x.name[:pos])
+    @staticmethod
+    def _remove_files(target_files: Iterable[Path]) -> None:
+        for path in target_files:
+            path.unlink(missing_ok=True)
 
-        already_measured_files = []
-        for x in mp4_files:
-            if x.name in measured_txt_files and x.stat().st_size > 0:
-                already_measured_files.append(x.name)
+    def _get_file_sizes(self, transcoded_file: Path) -> tuple[int, int]:
+        original_file = self._source_files.get(transcoded_file)
+        if original_file is None:
+            raise ValueError(f"Original file not registered for {transcoded_file}")
+        return original_file.stat().st_size, transcoded_file.stat().st_size
 
-        return already_measured_files
-
-    def __remove_files(self, target_files):
-        for x in target_files:
-            x.unlink(missing_ok=True)
-
-    def __get_original_transcoded_file_size(self, transcoded_file):
-        for x in self.orig_target_file_size:
-            if x[1] == transcoded_file:
-                return x[0].stat().st_size, x[1].stat().st_size
-        return 1, 1
-
-    def __save_to_csv(self, df):
-        dst_path_file = self.done_path / "measured_data.csv"
-        count = 0
+    def _next_result_paths(self) -> tuple[Path, Path]:
+        index = 0
         while True:
-            if os.path.isfile(dst_path_file):
-                dst_path_file = self.done_path / f"measured_data_{count}.csv"
-                count += 1
-            else:
-                break
+            suffix = "" if index == 0 else f"_{index}"
+            csv_path = self.done_path / f"measured_data{suffix}.csv"
+            json_path = self.done_path / f"measured_data{suffix}.json"
+            if not csv_path.exists() and not json_path.exists():
+                return csv_path, json_path
+            index += 1
 
+    def _save_results(self, dataframe: pd.DataFrame) -> bool:
+        csv_path, json_path = self._next_result_paths()
         try:
-            df.to_csv(dst_path_file, index=False)
-            print(f"[S] Saved to {dst_path_file}")
-        except Exception as e:
-            print(f"[E] Failed to save to {dst_path_file}")
+            dataframe.to_csv(csv_path, index=False)
+            dataframe.to_json(
+                json_path, orient="records", indent=4, force_ascii=False
+            )
+        except (OSError, ValueError, TypeError) as error:
+            self._remove_files((csv_path, json_path))
+            print(f"[Error] Failed to save measured data: {error}")
             return False
+
+        print(f"[Success] Saved measured data to {csv_path} and {json_path}")
         return True
 
-    def __save_to_json(self, df):
-        dst_path_file = self.done_path / "measured_data.json"
-        count = 0
-        while True:
-            if os.path.isfile(dst_path_file):
-                dst_path_file = self.done_path / f"measured_data_{count}.json"
-                count += 1
-            else:
-                break
+    def _result_record(self, transcoded_file: Path) -> dict[str, object]:
+        psnr_file, ssim_file = self._metric_report_paths(transcoded_file)
+        metrics = self._parse_metrics(psnr_file, ssim_file)
+        original_size, transcoded_size = self._get_file_sizes(transcoded_file)
+        return {
+            "file_name": transcoded_file.name,
+            "psnr_avg": metrics.psnr_avg,
+            "psnr_y": metrics.psnr_y,
+            "ssim_all": metrics.ssim_all,
+            "ssim_y": metrics.ssim_y,
+            "orig_file_size": original_size,
+            "trans_file_size": transcoded_size,
+            "ratio": round(transcoded_size / original_size, 2),
+        }
 
-        try:
-            df.to_json(dst_path_file,
-                        orient="records",
-                        indent=4,
-                        force_ascii=False)
+    def _completed_transcoded_files(self) -> list[Path]:
+        return sorted(
+            path for path in self._source_files if self._is_nonempty_file(path)
+        )
 
-            print(f"[S] Saved to {dst_path_file}")
-        except Exception as e:
-            print(f"[E] Failed to save to {dst_path_file}")
+    def _gather_measured_data(self) -> bool:
+        transcoded_files = self._completed_transcoded_files()
+        records = [self._result_record(path) for path in transcoded_files]
+        dataframe = pd.DataFrame(records, columns=RESULT_COLUMNS)
+        if not self._save_results(dataframe):
             return False
+
+        reports = (
+            report
+            for transcoded_file in transcoded_files
+            for report in self._metric_report_paths(transcoded_file)
+        )
+        self._remove_files(reports)
         return True
 
-    def __gethering_measured_data(self):
-        transcoded_mp4_files = self.temp_path.glob("*.mp4")
-        all_measured_files = []
-        results = []
-        for transcoded_file in transcoded_mp4_files:
-            psnr_file = transcoded_file.with_name(f"{transcoded_file.name}_psnr.txt")
-            ssim_file = transcoded_file.with_name(f"{transcoded_file.name}_ssim.txt")
-            all_measured_files.append(psnr_file)
-            all_measured_files.append(ssim_file)
-            avg_psnr_avg, avg_psnr_y, avg_ssim_all, avg_ssim_y = self.__parsing_psnr_ssim(psnr_file, ssim_file)
-            orig_file_size, trans_file_size = self.__get_original_transcoded_file_size(transcoded_file)
-            new_data = {
-                'file_name': transcoded_file.name,
-                'psnr_avg': avg_psnr_avg,
-                'psnr_y': avg_psnr_y,
-                'ssim_all': avg_ssim_all,
-                'ssim_y': avg_ssim_y,
-                "orig_file_size": orig_file_size,
-                "trans_file_size": trans_file_size,
-                "ratio": round(trans_file_size / orig_file_size, 2)
-            }
-            results.append(new_data)
-
-        df = pd.DataFrame(results)
-        self.__save_to_csv(df)
-        self.__save_to_json(df)
-        self.__remove_files(all_measured_files)
-        return True
-
-    def __move_transcoded_files(self):
-        mp4_files = self.temp_path.glob("*.mp4")
-        fail_count = 0
-        for file in mp4_files:
+    def _move_transcoded_files(self) -> None:
+        transcoded_files = self._completed_transcoded_files()
+        failed_files = []
+        for path in transcoded_files:
             try:
-                shutil.move(str(file), self.done_path)
-            except Exception as e:
-                print(f"[E] Failed to move {file} to {self.done_path}")
-                fail_count += 1
+                shutil.move(str(path), self.done_path / path.name)
+            except (OSError, shutil.Error) as error:
+                print(f"[Error] Failed to move {path} to {self.done_path}: {error}")
+                failed_files.append(path)
 
-        if fail_count == 0:
-            print(f"[S] Move all transcoded files to {self.done_path}")
+        if failed_files:
+            print(f"[Error] Failed to move {len(failed_files)} transcoded file(s)")
         else:
-            print(f"[E] Failed to move {fail_count} files to {self.done_path}")
+            print(f"[Success] Moved all transcoded files to {self.done_path}")
 
         if not any(self.temp_path.iterdir()):
             self.temp_path.rmdir()
 
-    def __run_transcoding(self, target_files):
-        already_measured_files = self.list_up_already_measured_files()
+    @staticmethod
+    def _get_video_bitrate(target_file: Path) -> int:
+        command = [
+            FFPROBE,
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=bit_rate",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(target_file),
+        ]
+        output = subprocess.check_output(command, text=True).strip()
+        bitrate = int(output)
+        if bitrate <= 0:
+            raise ValueError(f"Invalid video bitrate: {output!r}")
+        return bitrate
 
-        count = 0
-        for cur_file in target_files:
-            count += 1
-            if cur_file.name in already_measured_files:
-                print(f"[Skip] {cur_file.name}. because already measured")
-                test_file_size = [cur_file, self.temp_path / cur_file.name]
-                self.orig_target_file_size.append(test_file_size)
+    def _print_quality_result(self, metrics: QualityMetrics, accepted: bool) -> None:
+        if accepted:
+            print(
+                "[Done] Quality accepted: "
+                f"PSNR={metrics.psnr_avg}, PSNR Y={metrics.psnr_y}, "
+                f"SSIM={metrics.ssim_all}, SSIM Y={metrics.ssim_y}"
+            )
+            return
+
+        print(
+            "[Retry] Substandard quality: "
+            f"PSNR={metrics.psnr_avg}/{self.psnr_threshold}, "
+            f"PSNR Y={metrics.psnr_y}/{self.psnr_threshold}, "
+            f"SSIM={metrics.ssim_all}/{self.ssim_threshold}, "
+            f"SSIM Y={metrics.ssim_y}/{self.ssim_threshold}"
+        )
+
+    def _process_file(self, target_file: Path, position: int, total: int) -> None:
+        try:
+            original_bitrate = self._get_video_bitrate(target_file)
+        except (OSError, ValueError, subprocess.CalledProcessError) as error:
+            print(f"[Error] Failed to get bitrate for {target_file}: {error}")
+            return
+
+        last_artifacts: tuple[Path, ...] = ()
+        for ratio in COMPRESS_RATIOS:
+            video_bitrate = round(original_bitrate * ratio)
+            print(
+                f"[{position}/{total}] Transcoding {target_file} "
+                f"from {original_bitrate} to {video_bitrate} bps"
+            )
+            transcoded_file = self._transcode(target_file, video_bitrate)
+            if transcoded_file is None:
                 continue
-            try:
-                cmd_get_bitrate = [
-                    FFPROBE,
-                    "-v", "error",
-                    "-select_streams", "v:0",
-                    "-show_entries", "stream=bit_rate",
-                    "-of", "default=noprint_wrappers=1:nokey=1",
-                    str(cur_file),
-                ]
-                orig_video_bitrate = subprocess.check_output(
-                    cmd_get_bitrate,
-                    text=True,
-                ).strip()
-                transcoding_done = False
-                for ratio in COMPRESS_RATIO:
-                    video_bitrate = round(int(orig_video_bitrate) * ratio)
-                    print(f"[{count}/{len(target_files)}] Transcoding the video file = {cur_file} and original bitrate = {orig_video_bitrate}, target bitrate = {video_bitrate}")
-                    transcoded_file = self.__transcoding(cur_file, video_bitrate)
-                    if transcoded_file == None:
-                        continue
-                    psnr_report, ssim_report = self.__measuring(cur_file, transcoded_file)
-                    if psnr_report is None or ssim_report is None:
-                        transcoded_file.unlink(missing_ok=True)
-                        continue
-                    avg_psnr_avg, avg_psnr_y, avg_ssim_all, avg_ssim_y = self.__parsing_psnr_ssim(psnr_report, ssim_report)
-                    if avg_psnr_avg > THRESHOLD_PSNR and avg_psnr_y > THRESHOLD_PSNR and avg_ssim_all > THRESHOLD_SSIM and avg_ssim_y > THRESHOLD_SSIM:
-                        print(f"[✔] Done transcoding. Avg PSNR: {avg_psnr_avg}, Avg PSNR Y: {avg_psnr_y}, Avg SSIM All: {avg_ssim_all}, Avg SSIM Y: {avg_ssim_y}")
-                        transcoding_done = True
-                        test_file_size = [cur_file, transcoded_file]
-                        self.orig_target_file_size.append(test_file_size)
-                        break
-                    else:
-                        print(f"[✘] Substandard video quality: Avg PSNR: {avg_psnr_avg}/{THRESHOLD_PSNR}, Avg PSNR Y: {avg_psnr_y}/{THRESHOLD_PSNR}, Avg SSIM All: {avg_ssim_all}/{THRESHOLD_SSIM}, Avg SSIM Y: {avg_ssim_y}/{THRESHOLD_SSIM}")
-                if transcoding_done == False:
-                    transcoded_file.unlink(missing_ok=True)
-                    psnr_report.unlink(missing_ok=True)
-                    ssim_report.unlink(missing_ok=True)
 
-            except subprocess.CalledProcessError:
-                print("[Error] Failed to get bitrate of the video file = {}".format(cur_file))
+            psnr_report, ssim_report = self._measure(target_file, transcoded_file)
+            if psnr_report is None or ssim_report is None:
+                transcoded_file.unlink(missing_ok=True)
+                continue
 
-    def run(self):
+            last_artifacts = (transcoded_file, psnr_report, ssim_report)
+            metrics = self._parse_metrics(psnr_report, ssim_report)
+            accepted = metrics.meets(self.psnr_threshold, self.ssim_threshold)
+            self._print_quality_result(metrics, accepted)
+            if accepted:
+                self._source_files[transcoded_file] = target_file
+                return
 
-        self.__prepare(self.args.path)
-        target_files = self.__gethering_target_files()
-        self.__run_transcoding(target_files)
-        if self.__gethering_measured_data() == True:
-            self.__move_transcoded_files()
+        self._remove_files(last_artifacts)
+
+    def _run_transcoding(self, target_files: Sequence[Path]) -> None:
+        already_measured = self.list_already_measured_files()
+        total = len(target_files)
+        for position, target_file in enumerate(target_files, start=1):
+            transcoded_file = self.temp_path / target_file.name
+            if target_file.name in already_measured:
+                print(f"[Skip] {target_file.name}: already measured")
+                self._source_files[transcoded_file] = target_file
+                continue
+            self._process_file(target_file, position, total)
+
+    def run(self) -> bool:
+        self._prepare_directories()
+        self._source_files.clear()
+        target_files = self._gather_target_files()
+        self._run_transcoding(target_files)
+        if not self._gather_measured_data():
+            return False
+        self._move_transcoded_files()
+        return True
+
+
+def build_argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Transcode videos while maintaining PSNR and SSIM thresholds."
+    )
+    parser.add_argument("-p", "--path", help="Directory containing video files")
+    parser.add_argument(
+        "--psnr", default=THRESHOLD_PSNR, type=float, help="PSNR threshold"
+    )
+    parser.add_argument(
+        "--ssim", default=THRESHOLD_SSIM, type=float, help="SSIM threshold"
+    )
+    parser.add_argument(
+        "-t",
+        "--threshold",
+        action="store_true",
+        help="Show the default PSNR and SSIM thresholds",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = build_argument_parser()
+    args = parser.parse_args(argv)
+    if args.threshold:
+        print(f"Threshold of PSNR: {args.psnr}, Threshold of SSIM: {args.ssim}")
+        return 0
+    if args.path is None:
+        parser.print_help()
+        return 0
+
+    try:
+        succeeded = ContentTranscoding(args).run()
+    except ValueError as error:
+        parser.error(str(error))
+    return 0 if succeeded else 1
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-p", "--path", help="Path to the video file")
-    parser.add_argument("--psnr", default=THRESHOLD_PSNR, type=float, help="Threshold of PSNR")
-    parser.add_argument("--ssim", default=THRESHOLD_SSIM, type=float, help="Threshold of SSIM")
-    parser.add_argument("-t", "--threshold", action="store_true", help="Show threshold of PSNR and SSIM")
-    args = parser.parse_args()
-    if args.psnr != THRESHOLD_PSNR:
-        THRESHOLD_PSNR = args.psnr
-    if args.ssim != THRESHOLD_SSIM:
-        THRESHOLD_SSIM = args.ssim
-
-    if args.threshold:
-        print(f"Threshold of PSNR: {THRESHOLD_PSNR}, Threshold of SSIM: {THRESHOLD_SSIM}")
-        exit(0)
-
-    if args.path == None:
-        parser.print_help()
-        exit(0)
-
-    content_transcoding = ContentTranscoding(args)
-    content_transcoding.run()
+    raise SystemExit(main())
