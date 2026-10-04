@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 
 
 TARGET_EXTENSIONS = frozenset({".mp4"})
@@ -64,7 +64,10 @@ class VideoInfo:
 
 
 class ContentTranscoding:
-    def __init__(self, args: argparse.Namespace):
+    def __init__(
+        self, args: argparse.Namespace, *, output_directory: Path | None = None,
+        event_callback: Callable[[dict[str, object]], None] | None = None,
+    ):
         if args is None or not getattr(args, "path", None):
             raise ValueError("A target path is required")
         self.target_path = Path(args.path).resolve()
@@ -85,11 +88,17 @@ class ContentTranscoding:
             raise ValueError("Bitrate ratios must be unique and strictly increasing")
         if self.encoder_mode not in {"auto", "cpu", "cuda"}:
             raise ValueError("Encoder must be auto, cpu or cuda")
-        self.temp_path = self.target_path / "temporary"
-        self.done_path = self.target_path / "done"
+        self.output_root = Path(output_directory).resolve() if output_directory else self.target_path
+        self.temp_path = self.output_root / "temporary"
+        self.done_path = self.output_root / "done"
+        self.event_callback = event_callback
         self._source_files: dict[Path, Path] = {}
         self._results: list[dict[str, object]] = []
         self._measured_metrics: dict[tuple[Path, Path], QualityMetrics] = {}
+
+    def _emit(self, event: str, **data: object) -> None:
+        if self.event_callback is not None:
+            self.event_callback({"event": event, **data})
 
     def _prepare_directories(self) -> None:
         if not self.target_path.is_dir():
@@ -97,7 +106,7 @@ class ContentTranscoding:
         self.temp_path.mkdir(parents=True, exist_ok=True)
         self.done_path.mkdir(parents=True, exist_ok=True)
         for path in (self.temp_path, self.done_path):
-            if path.is_symlink() or path.resolve().parent != self.target_path:
+            if path.is_symlink() or path.resolve().parent != self.output_root:
                 raise ValueError(f"Output directory must be inside the target: {path}")
 
     def _gather_target_files(self) -> list[Path]:
@@ -138,6 +147,7 @@ class ContentTranscoding:
                 print(f"[Error] Failed to transcode {target_file}: {self._error_text(error)}")
             if attempt == 0 and self.encoder_mode == "auto" and self.use_cuda:
                 self.use_cuda = False
+                self._emit("encoder_changed", encoder="cpu")
                 print("[Fallback] Retrying with CPU libx265")
             else:
                 break
@@ -161,6 +171,7 @@ class ContentTranscoding:
     ) -> tuple[Path | None, Path | None]:
         if target_file is None:
             return None, None
+        self._emit("phase", phase="measuring", file_name=target_file.name)
         psnr_report, ssim_report = self._metric_report_paths(target_file)
         self._measured_metrics.pop((psnr_report, ssim_report), None)
         self._remove_files((psnr_report, ssim_report))
@@ -411,6 +422,7 @@ class ContentTranscoding:
             record["reason"] = "Output already exists; it was not overwritten"
             return record
         try:
+            self._emit("phase", phase="analyzing", file_name=target_file.name)
             source = self._get_video_info(target_file)
         except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
             record["reason"] = self._error_text(error)
@@ -424,6 +436,9 @@ class ContentTranscoding:
                 record[key] = None
             record.update(attempts=attempt, target_video_bitrate=bitrate)
             print(f"[{position}/{total}] {target_file.name}: {source.bitrate} -> {bitrate} bps")
+            self._emit("phase", phase="encoding", file_name=target_file.name,
+                       attempt=attempt, max_attempts=len(self.ratios), bitrate=bitrate,
+                       encoder="cuda" if self.use_cuda else "cpu")
             transcoded = self._transcode(target_file, bitrate)
             if transcoded is None:
                 had_error = True
@@ -431,6 +446,7 @@ class ContentTranscoding:
                 break
             reports = self._metric_report_paths(transcoded)
             try:
+                self._emit("phase", phase="validating", file_name=target_file.name)
                 candidate = self._get_video_info(transcoded)
                 if not self._compatible(source, candidate):
                     raise ValueError("Frame count, duration, format, streams or video metadata changed")
@@ -454,6 +470,7 @@ class ContentTranscoding:
                 )
                 accepted = metrics.meets(self.psnr_threshold, self.ssim_threshold)
                 self._print_quality_result(metrics, accepted)
+                self._emit("metrics", **record)
                 if accepted and size < source_stat.st_size and candidate.bitrate < source.bitrate:
                     record["status"] = "accepted"
                     self._source_files[transcoded] = target_file
@@ -478,6 +495,8 @@ class ContentTranscoding:
 
     def _run_transcoding(self, target_files: Sequence[Path]) -> None:
         for position, target in enumerate(target_files, start=1):
+            self._emit("file_started", position=position, total=len(target_files),
+                       file_name=target.name, source_path=str(target))
             try:
                 record = self._process_file(target, position, len(target_files))
             except (OSError, ValueError, subprocess.CalledProcessError) as error:
@@ -486,6 +505,7 @@ class ContentTranscoding:
                 record.update(file_name=target.name, status="failed", attempts=0,
                               reason=self._error_text(error))
             self._results.append(record)
+            self._emit("file_completed", position=position, record=record)
             if record["status"] != "accepted":
                 print(f"[{record['status']}] {target.name}: {record['reason']}")
 
@@ -562,12 +582,18 @@ class ContentTranscoding:
         print(f"[Success] Saved measured data to {csv_path} and {json_path}")
         return True
 
-    def run(self) -> bool:
+    def run(self, target_files: Sequence[Path] | None = None) -> bool:
         self._prepare_directories()
         for executable in (FFMPEG, FFPROBE):
             if shutil.which(executable) is None:
                 raise ValueError(f"Required executable not found in PATH: {executable}")
-        targets = self._gather_target_files()
+        targets = self._gather_target_files() if target_files is None else [Path(p).absolute() for p in target_files]
+        if len(set(targets)) != len(targets):
+            raise ValueError("Duplicate target files")
+        for target in targets:
+            if (target.parent != self.target_path or target.is_symlink() or not target.is_file()
+                    or target.suffix.lower() not in TARGET_EXTENSIONS):
+                raise ValueError(f"Invalid selected video: {target}")
         if not targets:
             print("[Info] No MP4 files found")
             return True
