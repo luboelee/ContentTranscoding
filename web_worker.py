@@ -39,6 +39,7 @@ def execute(job_directory: Path) -> int:
     failed = False
     completed = 0
     for group_index, (parent, sources) in enumerate(groups.items()):
+        source_mtimes = {str(source): source.stat().st_mtime_ns for source in sources}
         def callback(event):
             event = dict(event)
             if "position" in event:
@@ -64,7 +65,8 @@ def execute(job_directory: Path) -> int:
                 group_records.append(record)
         for source, record in zip(sources, group_records):
             output = transcoder.done_path / source.name
-            record = {**record, "source_path": str(source), "output_path": None}
+            record = {**record, "source_path": str(source), "output_path": None,
+                      "source_mtime_ns": source_mtimes[str(source)]}
             if record["status"] == "accepted" and output.is_file():
                 record["output_path"] = str(output)
             elif record["status"] == "accepted":
@@ -77,7 +79,7 @@ def execute(job_directory: Path) -> int:
     result_path = job_directory / "results.json"
     result_path.write_text(json.dumps(records, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
     with (job_directory / "results.csv").open("w", encoding="utf-8-sig", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=(*RESULT_COLUMNS, "source_path", "output_path"))
+        writer = csv.DictWriter(file, fieldnames=(*RESULT_COLUMNS, "source_path", "output_path", "source_mtime_ns"))
         writer.writeheader()
         writer.writerows(records)
     emit({"event": "finished", "status": "failed" if failed else "completed", "records": records})

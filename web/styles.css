@@ -1277,7 +1277,15 @@ select {
 }
 .report-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 7px;
+}
+.replace-note {
+  color: #9ca3aa;
+  font-size: 11px;
+  line-height: 1.8;
+  margin: 12px 0 0;
 }
 .result-summary {
   display: grid;
@@ -1398,6 +1406,9 @@ td small {
   font-size: 9px;
   background: #eef6f0;
   color: #5f8870;
+}
+.result-badge.accepted {
+  background: #fff3b0;
 }
 .result-badge.unchanged {
   background: #f1f3f5;

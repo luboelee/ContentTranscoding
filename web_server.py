@@ -9,6 +9,7 @@ import stat
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import uuid
 import webbrowser
@@ -160,6 +161,7 @@ class JobManager:
         self.jobs = {}
         self.active_process = None
         self.running_job_id = None
+        self.replacing_jobs = set()
         self.idle = threading.Event()
         self.idle.set()
         for path in self.directory.glob("*/job.json"):
@@ -194,7 +196,110 @@ class JobManager:
             record["download_url"] = f"/api/jobs/{job_id}/files/{index}" if record.get("output_path") else None
         job["reports"] = {extension: f"/api/jobs/{job_id}/report.{extension}" for extension in ("csv", "json")
                           if (self.directory / job_id / f"results.{extension}").is_file()}
+        job["replacing"] = job_id in self.replacing_jobs
+        job["replaceable_count"] = sum(record.get("status") == "accepted" and bool(record.get("output_path"))
+                                       and not record.get("replaced_at") for record in job["records"])
         return job
+
+    @staticmethod
+    def _copy_atomic(source, destination, before_replace=None):
+        """Finish copying on the destination volume before touching the original."""
+        descriptor, name = tempfile.mkstemp(prefix=".transcoding-", suffix=".tmp", dir=destination.parent)
+        temporary = Path(name)
+        try:
+            with os.fdopen(descriptor, "wb") as output, source.open("rb") as input_file:
+                shutil.copyfileobj(input_file, output)
+                output.flush()
+                os.fsync(output.fileno())
+            if temporary.stat().st_size != source.stat().st_size:
+                raise OSError("복사한 파일 크기가 결과 파일과 다릅니다.")
+            if before_replace:
+                before_replace()
+            temporary.replace(destination)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def replace_originals(self, job_id, access):
+        with self.lock:
+            directory = self.directory / job_id
+            if (len(job_id) != 32 or any(character not in "0123456789abcdef" for character in job_id)
+                    or is_link(directory) or directory.resolve().parent != self.directory):
+                raise PermissionError("허용되지 않은 작업 경로입니다.")
+            job = self.get(job_id)
+            if self.replacing_jobs:
+                raise RuntimeError("원본 파일을 대체하는 중입니다.")
+            records = [(index, record) for index, record in enumerate(job["records"])
+                       if record["status"] == "accepted" and record.get("output_path")
+                       and not record.get("replaced_at")]
+            if not records:
+                raise RuntimeError("대체할 수 있는 성공한 결과 파일이 없습니다.")
+            selected = {entry["path"] for entry in job.get("files", [])}
+            busy_sources = {entry["path"] for key, other in self.jobs.items()
+                            if key != job_id and other["status"] in {"queued", "running"}
+                            for entry in other.get("files", [])}
+            self.replacing_jobs.add(job_id)
+        replaced, errors, reports = [], [], set()
+        try:
+            for index, record in records:
+                try:
+                    raw = record.get("source_path")
+                    if raw not in selected or is_link(Path(raw)):
+                        raise PermissionError("이 작업에서 선택한 원본 파일만 대체할 수 있습니다.")
+                    if raw in busy_sources:
+                        raise RuntimeError("다른 작업에서 사용 중인 원본입니다. 작업 완료 후 다시 시도해 주세요.")
+                    source = access.resolve(raw)
+                    if not source.is_file() or source.suffix.lower() != ".mp4":
+                        raise ValueError("원본 MP4 파일을 찾을 수 없습니다.")
+                    output = self.artifact(job_id, f"files/{index}")
+                    size = output.stat().st_size
+                    if size <= 0 or size != record.get("trans_file_size") or size >= record.get("orig_file_size", 0):
+                        raise ValueError("결과 파일의 크기가 검증된 압축 결과와 다릅니다.")
+                    original_stat = source.stat()
+                    if original_stat.st_size != record.get("orig_file_size") or (
+                        record.get("source_mtime_ns") is not None
+                        and original_stat.st_mtime_ns != record["source_mtime_ns"]
+                    ):
+                        raise RuntimeError("트랜스코딩 이후 원본이 변경되어 대체하지 않았습니다.")
+
+                    # Each output group belongs to one original folder. Copy its
+                    # reports even when other groups are still being transcoded.
+                    for extension in ("json", "csv"):
+                        report = output.parent / f"measured_data.{extension}"
+                        resolved = report.resolve(strict=True)
+                        if not resolved.is_relative_to(self.directory / job_id) or not resolved.is_file():
+                            raise PermissionError("허용되지 않은 보고서 경로입니다.")
+                        destination = source.parent / f"measured_data_{job_id}.{extension}"
+                        if destination not in reports:
+                            if is_link(destination):
+                                raise PermissionError("보고서 대상이 링크 파일입니다.")
+                            self._copy_atomic(resolved, destination)
+                            reports.add(destination)
+
+                    def verify_original():
+                        if is_link(Path(raw)) or access.resolve(raw) != source:
+                            raise PermissionError("원본 파일 경로가 변경되었습니다.")
+                        current = source.stat()
+                        if (current.st_size, current.st_mtime_ns, current.st_ino) != (
+                            original_stat.st_size, original_stat.st_mtime_ns, original_stat.st_ino
+                        ):
+                            raise RuntimeError("복사 중 원본이 변경되어 대체하지 않았습니다.")
+
+                    self._copy_atomic(output, source, verify_original)
+                    with self.lock:
+                        current_record = self.jobs[job_id]["records"][index]
+                        current_record.update(replaced_at=timestamp(), replacement_error=None)
+                        self._persist(self.jobs[job_id])
+                    replaced.append(str(source))
+                except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
+                    errors.append({"file_name": record["file_name"], "error": str(error)})
+                    with self.lock:
+                        self.jobs[job_id]["records"][index]["replacement_error"] = str(error)
+                        self._persist(self.jobs[job_id])
+            return {"replaced_count": len(replaced), "replaced_paths": replaced,
+                    "report_paths": sorted(str(path) for path in reports), "errors": errors}
+        finally:
+            with self.lock:
+                self.replacing_jobs.discard(job_id)
 
     def delete_history(self, job_id=None):
         """Remove persisted history only; leave sources, videos and reports intact."""
@@ -202,12 +307,14 @@ class JobManager:
             if job_id is not None:
                 if job_id not in self.jobs:
                     raise KeyError("작업을 찾을 수 없습니다.")
-                if self.jobs[job_id]["status"] in {"queued", "running"} or job_id == self.running_job_id:
+                if (self.jobs[job_id]["status"] in {"queued", "running"} or job_id == self.running_job_id
+                        or job_id in self.replacing_jobs):
                     raise RuntimeError("실행 중인 작업의 기록은 삭제할 수 없습니다.")
                 selected = [job_id]
             else:
                 selected = [key for key, job in self.jobs.items()
-                            if job["status"] not in {"queued", "running"} and key != self.running_job_id]
+                            if job["status"] not in {"queued", "running"} and key != self.running_job_id
+                            and key not in self.replacing_jobs]
             deleted = []
             for key in selected:
                 directory = self.directory / key
@@ -245,7 +352,7 @@ class JobManager:
         if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
             raise ValueError("FFmpeg와 ffprobe를 설치한 뒤 서버를 다시 실행해 주세요.")
         with self.lock:
-            if self.running_job_id or any(job["status"] in {"queued", "running"} for job in self.jobs.values()):
+            if self.running_job_id or self.replacing_jobs or any(job["status"] in {"queued", "running"} for job in self.jobs.values()):
                 raise RuntimeError("실행 중인 작업이 있습니다. 완료된 후 새 작업을 시작해 주세요.")
             job_id = uuid.uuid4().hex
             directory = self.directory / job_id
@@ -316,6 +423,13 @@ class JobManager:
 
     def _event(self, job, event):
         kind = event["event"]
+        if kind in {"results", "finished"}:
+            previous = {record.get("source_path"): record for record in job["records"]}
+            for record in event["records"]:
+                saved = previous.get(record.get("source_path"), {})
+                for key in ("replaced_at", "replacement_error"):
+                    if key in saved:
+                        record[key] = saved[key]
         if kind == "file_started":
             job.update(current_file=event["file_name"], current_path=event["source_path"],
                        position=event["position"], metrics=None, attempt=None, phase="analyzing")
@@ -471,6 +585,10 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         self._json(404, {"error": "API를 찾을 수 없습니다."})
                     return
+                parts = path.strip("/").split("/")
+                if len(parts) == 4 and parts[:2] == ["api", "jobs"] and parts[3] == "replace":
+                    self._json(200, self.server.manager.replace_originals(parts[2], self.server.access))
+                    return
                 files = self.server.access.select(data.get("paths"), data.get("recursive", False))
                 if path == "/api/selection":
                     self._json(200, {"files": files, "total_size": sum(f["size"] for f in files)})
@@ -528,7 +646,7 @@ def main():
         parser.error(str(error))
     address = f"http://127.0.0.1:{server.server_port}"
     print(f"Frame Studio: {address}", flush=True)
-    print("Press Ctrl+C to stop. Original video files are preserved.", flush=True)
+    print("Press Ctrl+C to stop. Originals are preserved until Replace is used.", flush=True)
     if args.open:
         webbrowser.open(address)
     try:

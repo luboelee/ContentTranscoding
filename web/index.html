@@ -214,7 +214,7 @@
                 <div class="source-footer">
                   <svg><use href="#i-shield" /></svg
                   ><span
-                    >업로드 없이, 이 컴퓨터의 원본을 그대로 보존합니다.</span
+                    >업로드 없이 처리하고, Replace를 누르면 원본을 대체합니다.</span
                   >
                 </div>
               </section>
@@ -385,14 +385,21 @@
                   작업이 끝나면 영상별 화질과 압축 결과를 확인할 수 있습니다.
                 </p>
               </div>
-              <div class="report-actions" id="report-actions" hidden>
-                <a class="button secondary small-button" id="download-csv"
+              <div class="report-actions" id="report-actions">
+                <button class="button primary small-button" id="replace-originals" disabled
+                  title="성공한 결과 영상으로 원본을 대체하고 JSON·CSV 보고서를 원본 폴더에 복사합니다.">
+                  Replace
+                </button>
+                <a class="button secondary small-button" id="download-csv" hidden
                   ><svg><use href="#i-download" /></svg>CSV</a
-                ><a class="button secondary small-button" id="download-json"
+                ><a class="button secondary small-button" id="download-json" hidden
                   >JSON</a
                 >
               </div>
             </div>
+            <p class="replace-note" id="replace-note" role="status">
+              성공한 영상이 있으면 Replace로 원본을 대체하고 JSON·CSV를 원본 폴더에 복사할 수 있습니다.
+            </p>
             <div class="history-toolbar">
               <label for="history-select">실행 기록</label
               ><select id="history-select" disabled>
@@ -547,6 +554,14 @@
             지정한 비트레이트 비율을 낮은 순서로 시도합니다. 결과는 별도 작업
             폴더에 저장하고, 영상·CSV·JSON을 다운로드할 수 있습니다. 브라우저를
             닫아도 서버가 켜져 있으면 작업은 계속됩니다.
+          </p>
+        </li>
+        <li>
+          <strong>원본 대체</strong>
+          <p>
+            성공한 영상이 하나 이상이면 Replace가 활성화됩니다. 누르면 성공한
+            결과 영상으로 원본을 덮어쓰고, 해당 폴더의 JSON·CSV 보고서도 복사합니다.
+            보고서 이름에는 작업 ID를 붙여 이전 보고서를 보존합니다.
           </p>
         </li>
       </ol>

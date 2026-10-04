@@ -175,6 +175,144 @@ class WebServerTests(unittest.TestCase):
         self.assertNotIn(job_id, JobManager(self.manager.directory).jobs)
         self.assertEqual(self.request(f"/api/jobs/{job_id}", {}, method="DELETE")[0], 404)
 
+    def make_replace_job(self, status="completed"):
+        job_id = "9" * 32
+        directory = self.make_history(job_id, status)
+        job = self.manager.jobs[job_id]
+        job["files"] = []
+        for group, parent in enumerate((self.media, self.media / "nested")):
+            parent.mkdir(exist_ok=True)
+            source = parent / "same [영상].mp4"
+            source.write_bytes(b"original video bytes")
+            output_directory = directory / "outputs" / str(group) / "done"
+            output_directory.mkdir(parents=True)
+            output = output_directory / source.name
+            output.write_bytes(b"compressed")
+            for extension in ("json", "csv"):
+                (output_directory / f"measured_data.{extension}").write_text(f"group {group} {extension}")
+            job["files"].append({"path": str(source), "name": source.name, "size": source.stat().st_size})
+            job["records"].append({"file_name": source.name, "source_path": str(source),
+                                   "output_path": str(output), "status": "accepted",
+                                   "orig_file_size": source.stat().st_size, "trans_file_size": output.stat().st_size,
+                                   "source_mtime_ns": source.stat().st_mtime_ns})
+        untouched = self.media / "unchanged.mp4"
+        untouched.write_bytes(b"leave me alone")
+        job["records"].append({"file_name": untouched.name, "source_path": str(untouched),
+                               "output_path": None, "status": "unchanged"})
+        job["summary"] = self.manager.summary(job["records"])
+        self.manager._persist(job)
+        return job_id, job
+
+    def test_replace_copies_successes_and_folder_reports_and_persists(self):
+        job_id, job = self.make_replace_job(status="failed")
+        self.assertEqual(self.request(f"/api/jobs/{job_id}")[1]["replaceable_count"], 2)
+        existing_report = self.media / "measured_data.json"
+        existing_report.write_text("previous report")
+        status, response = self.request(f"/api/jobs/{job_id}/replace", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(response["replaced_count"], 2)
+        self.assertEqual(response["errors"], [])
+        self.assertEqual(len(response["report_paths"]), 4)
+        for group, record in enumerate(job["records"][:2]):
+            source, output = Path(record["source_path"]), Path(record["output_path"])
+            self.assertEqual(source.read_bytes(), output.read_bytes())
+            self.assertTrue(output.is_file())
+            for extension in ("json", "csv"):
+                self.assertEqual((source.parent / f"measured_data_{job_id}.{extension}").read_bytes(),
+                                 (output.parent / f"measured_data.{extension}").read_bytes())
+            self.assertTrue(record["replaced_at"])
+        self.assertEqual(existing_report.read_text(), "previous report")
+        self.assertEqual((self.media / "unchanged.mp4").read_bytes(), b"leave me alone")
+        self.assertEqual(self.request(f"/api/jobs/{job_id}")[1]["replaceable_count"], 0)
+        self.assertEqual(self.request(f"/api/jobs/{job_id}/replace", {})[0], 409)
+        reloaded = JobManager(self.manager.directory)
+        self.assertTrue(reloaded.get(job_id)["records"][0]["replaced_at"])
+        self.assertFalse(list(self.media.rglob(".transcoding-*.tmp")))
+
+    def test_replace_without_success_and_unknown_jobs_are_rejected(self):
+        job_id = "8" * 32
+        self.make_history(job_id)
+        self.assertEqual(self.request(f"/api/jobs/{job_id}/replace", {})[0], 409)
+        self.assertEqual(self.request(f"/api/jobs/{'0' * 32}/replace", {})[0], 404)
+        self.assertEqual(self.request("/api/jobs/../replace", {})[0], 403)
+
+    def test_replace_requires_token_and_trusted_origin(self):
+        job_id, job = self.make_replace_job()
+        for headers in ({"X-CSRF-Token": "invalid"}, {"Origin": "https://untrusted.example"},
+                        {"Sec-Fetch-Site": "cross-site"}):
+            with self.subTest(headers=headers):
+                self.assertEqual(self.request(f"/api/jobs/{job_id}/replace", {}, headers)[0], 403)
+        self.assertEqual(Path(job["records"][0]["source_path"]).read_bytes(), b"original video bytes")
+
+    def test_replace_copy_failure_preserves_original_and_retry_skips_completed(self):
+        job_id, job = self.make_replace_job()
+        original_copy = shutil.copyfileobj
+        failed_output = Path(job["records"][0]["output_path"])
+
+        def failing_copy(input_file, output_file):
+            if Path(input_file.name) == failed_output:
+                output_file.write(b"partial")
+                raise OSError("simulated disk full")
+            return original_copy(input_file, output_file)
+
+        with patch("web_server.shutil.copyfileobj", side_effect=failing_copy):
+            result = self.manager.replace_originals(job_id, self.server.access)
+        self.assertEqual(result["replaced_count"], 1)
+        self.assertEqual(len(result["errors"]), 1)
+        self.assertEqual(Path(job["records"][0]["source_path"]).read_bytes(), b"original video bytes")
+        self.assertFalse(list(self.media.rglob(".transcoding-*.tmp")))
+        second_timestamp = job["records"][1]["replaced_at"]
+        result = self.manager.replace_originals(job_id, self.server.access)
+        self.assertEqual(result["replaced_count"], 1)
+        self.assertEqual(result["errors"], [])
+        self.assertEqual(job["records"][1]["replaced_at"], second_timestamp)
+
+    def test_replace_missing_report_or_changed_files_preserves_original(self):
+        job_id, job = self.make_replace_job()
+        first, second = job["records"][:2]
+        (Path(first["output_path"]).parent / "measured_data.csv").unlink()
+        Path(second["source_path"]).write_bytes(b"modified original")
+        result = self.manager.replace_originals(job_id, self.server.access)
+        self.assertEqual(result["replaced_count"], 0)
+        self.assertEqual(len(result["errors"]), 2)
+        self.assertEqual(Path(first["source_path"]).read_bytes(), b"original video bytes")
+        self.assertEqual(Path(second["source_path"]).read_bytes(), b"modified original")
+
+    def test_replace_denies_unselected_sources_and_outputs_outside_job(self):
+        job_id, job = self.make_replace_job()
+        other = self.root / "outside.mp4"
+        other.write_bytes(b"original video bytes")
+        job["records"][0]["source_path"] = str(other)
+        job["records"][1]["output_path"] = str(other)
+        result = self.manager.replace_originals(job_id, self.server.access)
+        self.assertEqual(result["replaced_count"], 0)
+        self.assertEqual(len(result["errors"]), 2)
+        self.assertEqual(other.read_bytes(), b"original video bytes")
+
+    def test_replace_published_group_while_running_survives_final_events(self):
+        job_id, job = self.make_replace_job(status="running")
+        result = self.manager.replace_originals(job_id, self.server.access)
+        self.assertEqual(result["replaced_count"], 2)
+        records = [{key: value for key, value in record.items()
+                    if key not in {"replaced_at", "replacement_error"}} for record in job["records"]]
+        for event in ({"event": "results", "records": records, "completed": 3},
+                      {"event": "finished", "records": records, "status": "completed"}):
+            self.manager._event(job, event)
+            self.assertTrue(job["records"][0]["replaced_at"])
+        self.assertEqual(self.manager.get(job_id)["replaceable_count"], 0)
+
+    def test_replace_busy_source_and_concurrent_copy_are_rejected(self):
+        job_id, job = self.make_replace_job()
+        other_id = "6" * 32
+        self.make_history(other_id, "running")
+        self.manager.jobs[other_id]["files"] = job["files"]
+        result = self.manager.replace_originals(job_id, self.server.access)
+        self.assertEqual(result["replaced_count"], 0)
+        self.assertEqual(len(result["errors"]), 2)
+        self.manager.replacing_jobs.add(job_id)
+        self.assertEqual(self.request(f"/api/jobs/{job_id}/replace", {})[0], 409)
+        self.assertEqual(self.request(f"/api/jobs/{job_id}", {}, method="DELETE")[0], 409)
+
     def test_delete_running_history_is_rejected(self):
         for status in ("queued", "running", "completed"):
             with self.subTest(status=status):
@@ -252,6 +390,15 @@ class WebServerTests(unittest.TestCase):
         self.assertEqual(history["jobs"][0]["id"], job["id"])
         reloaded = JobManager(self.manager.directory)
         self.assertEqual(reloaded.jobs[job["id"]]["status"], "completed")
+        status, replacement = self.request(f"/api/jobs/{job['id']}/replace", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(replacement["replaced_count"], 1)
+        self.assertEqual(replacement["errors"], [])
+        self.assertEqual(source.read_bytes(), result)
+        self.assertEqual(unrelated.read_bytes(), b"must not be processed")
+        copied_report = json.loads((self.media / f"measured_data_{job['id']}.json").read_text(encoding="utf-8"))
+        self.assertEqual(copied_report[0]["status"], "accepted")
+        self.assertTrue((self.media / f"measured_data_{job['id']}.csv").is_file())
 
 
 if __name__ == "__main__":

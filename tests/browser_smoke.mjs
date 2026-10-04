@@ -1,13 +1,13 @@
 // Optional browser check: start Chrome with --headless=new --remote-debugging-port=9222
 // and a separate --user-data-dir, then run: node tests/browser_smoke.mjs
-import { writeFile, mkdir, access } from "node:fs/promises";
+import { writeFile, mkdir, access, readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 
 const origin = process.env.FRAME_STUDIO_URL || "http://127.0.0.1:8765";
 const debugOrigin = process.env.CHROME_DEBUG_URL || "http://127.0.0.1:9222";
-const output = resolve(".web-data/browser-artifacts");
-const fixture = resolve(".web-data/ui-fixtures");
+const output = resolve(process.env.FRAME_STUDIO_ARTIFACT_DIR || ".web-data/browser-artifacts");
+const fixture = resolve(process.env.FRAME_STUDIO_FIXTURE_DIR || ".web-data/ui-fixtures");
 await mkdir(fixture, { recursive: true });
 try {
   await access(resolve(fixture, "Studio sample.mp4"));
@@ -133,6 +133,8 @@ try {
     "document.querySelector('#server-status')?.textContent === 'FFmpeg 준비됨'",
   );
   await screenshot("desktop-initial.png", true);
+  if (await evaluate("state.job === null && !document.querySelector('#replace-originals').disabled"))
+    throw new Error("Replace must be disabled without successful results.");
   await evaluate("document.querySelector('#choose-files').click()");
   await until(
     "document.querySelector('#file-dialog').open && document.querySelector('#browse-entries .loading-text') === null || document.querySelector('#browse-message').textContent.includes('선택')",
@@ -170,6 +172,8 @@ try {
   )
     throw new Error("Expected an accepted video.");
   await screenshot("desktop-result.png", true);
+  if (await evaluate("document.querySelector('#replace-originals').disabled"))
+    throw new Error("Replace must be enabled for a saved successful result.");
   await send("Page.reload");
   await until(
     "document.querySelector('#monitor-state')?.textContent === '완료' && document.querySelector('#history-count')?.textContent !== '0'",
@@ -209,6 +213,27 @@ try {
     "document.documentElement.scrollWidth > document.documentElement.clientWidth + 1",
   );
   if (overflow) throw new Error("Mobile layout overflows the viewport.");
+  // Only overwrite the generated fixture on an explicitly isolated test run.
+  if (process.env.FRAME_STUDIO_CHECK_REPLACE === "1") {
+    if (resolve(report[0].source_path) !== resolve(fixture, "Studio sample.mp4"))
+      throw new Error("Replace target is not the generated sample video.");
+    const jobId = reportHref.split("/")[3];
+    const compressed = await readFile(report[0].output_path);
+    await evaluate("document.querySelector('#replace-originals').click()");
+    await until("document.querySelector('#results-body .result-badge')?.textContent === '원본 대체 완료'");
+    await until("state.replacing === null && document.querySelector('#replace-originals').disabled");
+    const original = await readFile(report[0].source_path);
+    if (!original.equals(compressed)) throw new Error("Original was not replaced with the result video.");
+    const groupReportDirectory = resolve(report[0].output_path, "..");
+    for (const extension of ["json", "csv"]) {
+      const copied = await readFile(resolve(fixture, `measured_data_${jobId}.${extension}`));
+      const sourceReport = await readFile(resolve(groupReportDirectory, `measured_data.${extension}`));
+      if (!copied.equals(sourceReport)) throw new Error(`${extension} report was not copied correctly.`);
+    }
+    await send("Page.reload");
+    await until("document.querySelector('#results-body .result-badge')?.textContent === '원본 대체 완료' && document.querySelector('#replace-originals').disabled");
+    await screenshot("mobile-after-replace.png", true);
+  }
   // Enable deletion checks against an isolated test server/data directory.
   if (process.env.FRAME_STUDIO_CHECK_DELETE === "1") {
     const jobId = reportHref.split("/")[3];

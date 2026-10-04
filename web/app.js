@@ -13,6 +13,7 @@ const state = {
   historyRequest: 0,
   deleteTarget: null,
   deleting: false,
+  replacing: null,
 };
 const statusLabels = {
   queued: "대기 중",
@@ -102,6 +103,7 @@ function setConnection(connected) {
       ? "FFmpeg 준비됨"
       : "FFmpeg 설치 필요";
   updateStartButton();
+  updateReplaceButton();
 }
 function updateStartButton() {
   const active =
@@ -111,9 +113,50 @@ function updateStartButton() {
     !state.selection?.files.length ||
     !state.config?.ffmpeg_ready ||
     !state.connected ||
+    Boolean(state.replacing) ||
     active;
   $("start-job").innerHTML =
     `${active ? "작업 실행 중" : "트랜스코딩 시작"}${icon("arrow")}`;
+}
+function updateReplaceButton() {
+  const records = state.job?.records || [];
+  const pending = records.filter(
+    (record) => record.status === "accepted" && record.output_path && !record.replaced_at,
+  ).length;
+  const replaced = records.filter((record) => record.replaced_at).length;
+  const busy = Boolean(state.replacing) || state.job?.replacing;
+  $("replace-originals").disabled = !pending || busy || !state.connected;
+  $("replace-originals").textContent = busy ? "복사 중…" : "Replace";
+  $("replace-note").textContent = busy
+    ? "성공한 영상과 JSON·CSV를 원본 폴더에 복사하고 있습니다."
+    : pending
+      ? `${replaced ? `${replaced}개 원본 대체 완료 · ` : ""}${pending}개 성공한 영상으로 원본을 덮어쓰고 JSON·CSV를 원본 폴더에 복사합니다.`
+      : replaced
+        ? `${replaced}개 원본 대체 완료 · JSON·CSV 보고서도 원본 폴더에 복사했습니다.`
+        : "성공한 영상이 있으면 Replace로 원본을 대체하고 JSON·CSV를 원본 폴더에 복사할 수 있습니다.";
+}
+async function replaceOriginals() {
+  const id = state.job?.id;
+  if (!id || $("replace-originals").disabled) return;
+  state.replacing = id;
+  updateReplaceButton();
+  updateStartButton();
+  try {
+    const result = await api(`/api/jobs/${id}/replace`, {});
+    if (state.job?.id === id) await selectJob(id);
+    notify(
+      `${result.replaced_count}개 원본 대체 · ${result.report_paths.length}개 보고서 복사${result.errors.length ? ` · ${result.errors.length}개 실패: ${result.errors[0].error}` : " 완료"}`,
+      result.errors.length > 0,
+    );
+  } catch (error) {
+    notify(error.message, true);
+    if (state.job?.id === id) await selectJob(id);
+  } finally {
+    state.replacing = null;
+    updateReplaceButton();
+    updateStartButton();
+    renderHistory();
+  }
 }
 function renderSelection() {
   const selection = state.selection;
@@ -310,10 +353,13 @@ function renderHistory() {
   updateStartButton();
   $("delete-history").disabled =
     state.deleting ||
+    Boolean(state.replacing) ||
+    state.job?.replacing ||
     !state.job ||
     ["running", "queued"].includes(state.job.status);
   $("clear-history").disabled =
     state.deleting ||
+    Boolean(state.replacing) ||
     !state.jobs.some((job) => !["running", "queued"].includes(job.status));
 }
 function clearViewedJob() {
@@ -427,6 +473,7 @@ async function selectJob(id) {
 }
 function renderJob() {
   const job = state.job;
+  updateReplaceButton();
   if (!job) {
     document.querySelector(".monitor").classList.remove("running", "has-job");
     $("monitor-state").textContent = "준비";
@@ -456,13 +503,14 @@ function renderJob() {
     $("log-content").textContent = "";
     [
       "results-table-wrap",
-      "report-actions",
       "job-error",
       "execution-log",
     ].forEach((id) => ($(id).hidden = true));
-    ["csv", "json"].forEach((extension) =>
-      $("download-" + extension).removeAttribute("href"),
-    );
+    ["csv", "json"].forEach((extension) => {
+      $("download-" + extension).removeAttribute("href");
+      $("download-" + extension).hidden = true;
+    });
+    $("summary-saved-note").textContent = "채택한 결과 기준 · 원본은 보존";
     updateStartButton();
     return;
   }
@@ -495,7 +543,12 @@ function renderJob() {
       ? `시도 ${job.attempt}/${job.max_attempts} · ${job.bitrate ? (job.bitrate / 1e6).toFixed(2) + " Mbps" : ""} · ${job.encoder === "cuda" ? "GPU" : "CPU"}`
       : active
         ? "영상별 완료 수를 표시합니다"
-        : "원본 영상은 그대로 보존되었습니다";
+        : job.records.some((record) => record.replaced_at)
+          ? `${job.records.filter((record) => record.replaced_at).length}개 원본을 결과 영상으로 대체했습니다`
+          : "원본 영상은 그대로 보존되었습니다";
+  $("summary-saved-note").textContent = job.records.some((record) => record.replaced_at)
+    ? "채택한 결과 기준 · 원본 대체 적용"
+    : "채택한 결과 기준 · 원본은 보존";
   ["analyzing", "encoding", "measuring"].forEach((stage, index) => {
     const phases = { analyzing: 0, encoding: 1, validating: 2, measuring: 2 };
     $("stage-" + stage).classList.toggle(
@@ -536,21 +589,22 @@ function renderJob() {
           ? `${((1 - record.ratio) * 100).toFixed(1)}%`
           : "—";
       const label =
-        accepted && !record.output_path
+        record.replaced_at
+          ? "원본 대체 완료"
+          : accepted && !record.output_path
           ? "검증 통과 · 저장 대기"
           : { accepted: "채택", unchanged: "원본 유지", failed: "실패" }[
               record.status
             ] || "확인 필요";
       const bitrate = (value) =>
         typeof value === "number" ? (value / 1e6).toFixed(2) + " Mbps" : "—";
-      const notes = [record.reason, record.warnings]
+      const notes = [record.reason, record.warnings, record.replacement_error]
         .filter(Boolean)
         .map((note) => `<small>${escapeHtml(note)}</small>`)
         .join("");
       return `<tr><td><strong>${escapeHtml(record.file_name)}</strong><small title="${escapeHtml(record.source_path)}">${escapeHtml(record.source_path)}</small>${notes}</td><td><span class="result-badge ${escapeHtml(record.status)}">${label}</span></td><td class="metric-value">${metric(record.psnr_avg, 2)} dB<small>Y ${metric(record.psnr_y, 2)} dB · ${record.attempts || 0}회 시도</small><small>SSIM ${metric(record.ssim_all, 4)} / Y ${metric(record.ssim_y, 4)}</small></td><td class="metric-value">${bytes(record.orig_file_size)}<small>→ ${accepted ? bytes(record.trans_file_size) : "원본 유지"}</small><small>${bitrate(record.orig_video_bitrate)}${accepted ? " → " + bitrate(record.trans_video_bitrate) : ""}</small></td><td class="metric-value">${reduction}</td><td>${record.download_url ? `<a class="download-link" href="${escapeHtml(record.download_url)}" aria-label="${escapeHtml(record.file_name)} 다운로드">${icon("download")}</a>` : ""}</td></tr>`;
     })
     .join("");
-  $("report-actions").hidden = !job.reports?.csv && !job.reports?.json;
   ["csv", "json"].forEach((extension) => {
     $("download-" + extension).hidden = !job.reports?.[extension];
     if (job.reports?.[extension])
@@ -682,6 +736,7 @@ document
   input.addEventListener("input", () => applyPreset("custom")),
 );
 $("start-job").addEventListener("click", startJob);
+$("replace-originals").addEventListener("click", replaceOriginals);
 $("history-list").addEventListener("click", async (event) => {
   const button = event.target.closest("[data-job]");
   if (button) {
