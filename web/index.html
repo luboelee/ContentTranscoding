@@ -1,0 +1,588 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f7f8fa" />
+    <title>Frame Studio · 영상 최적화</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <svg
+      class="icon-sprite"
+      xmlns="http://www.w3.org/2000/svg"
+      aria-hidden="true"
+    >
+      <symbol id="i-frame" viewBox="0 0 24 24">
+        <path d="M4 8V4h4m8 0h4v4m0 8v4h-4M8 20H4v-4" />
+        <path d="m10 8 6 4-6 4z" />
+      </symbol>
+      <symbol id="i-grid" viewBox="0 0 24 24">
+        <rect x="3" y="3" width="7" height="7" rx="1.5" />
+        <rect x="14" y="3" width="7" height="7" rx="1.5" />
+        <rect x="3" y="14" width="7" height="7" rx="1.5" />
+        <rect x="14" y="14" width="7" height="7" rx="1.5" />
+      </symbol>
+      <symbol id="i-history" viewBox="0 0 24 24">
+        <path d="M3 11a9 9 0 1 1 2 7M3 4v7h7m2-4v5l3 2" />
+      </symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24">
+        <path d="M3 7a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9H3z" />
+      </symbol>
+      <symbol id="i-video" viewBox="0 0 24 24">
+        <rect x="3" y="4" width="18" height="16" rx="2" />
+        <path d="m10 8 6 4-6 4zM6 4v16m12-16v16" />
+      </symbol>
+      <symbol id="i-arrow" viewBox="0 0 24 24">
+        <path d="M4 12h16m-6-6 6 6-6 6" />
+      </symbol>
+      <symbol id="i-check" viewBox="0 0 24 24">
+        <path d="m5 12 4 4L19 6" />
+      </symbol>
+      <symbol id="i-shield" viewBox="0 0 24 24">
+        <path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6z" />
+        <path d="m8 12 3 3 5-6" />
+      </symbol>
+      <symbol id="i-download" viewBox="0 0 24 24">
+        <path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5" />
+      </symbol>
+      <symbol id="i-close" viewBox="0 0 24 24">
+        <path d="m6 6 12 12M6 18 18 6" />
+      </symbol>
+      <symbol id="i-up" viewBox="0 0 24 24">
+        <path d="M12 20V4m-6 6 6-6 6 6" />
+      </symbol>
+      <symbol id="i-help" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="9" />
+        <path d="M9 9a3 3 0 1 1 5 2c-1 1-2 1-2 3m0 3h.01" />
+      </symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24">
+        <path d="M12 5v14M5 12h14" />
+      </symbol>
+      <symbol id="i-sliders" viewBox="0 0 24 24">
+        <path d="M4 7h6m4 0h6M4 17h10m4 0h2" />
+        <circle cx="12" cy="7" r="2" />
+        <circle cx="16" cy="17" r="2" />
+      </symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24">
+        <path d="m9 5 7 7-7 7" />
+      </symbol>
+    </svg>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <a href="/" class="brand"
+          ><span class="brand-mark"
+            ><svg><use href="#i-frame" /></svg></span
+          ><span
+            >frame<span class="brand-light">studio</span
+            ><small>VIDEO OPTIMIZATION</small></span
+          ></a
+        >
+        <div class="workspace-label">
+          WORKSPACE <span class="local-pill">LOCAL</span>
+        </div>
+        <nav aria-label="주 메뉴">
+          <button class="nav-button active" id="workspace-nav">
+            <svg><use href="#i-grid" /></svg>영상 최적화<span class="nav-key"
+              >01</span
+            >
+          </button>
+          <button class="nav-button" id="history-nav">
+            <svg><use href="#i-history" /></svg>실행 기록<span
+              class="nav-count"
+              id="history-count"
+              >0</span
+            >
+          </button>
+        </nav>
+        <div class="sidebar-section">
+          <span>최근 작업</span
+          ><button
+            class="icon-button"
+            id="refresh-history"
+            aria-label="실행 기록 새로고침"
+          >
+            <svg><use href="#i-history" /></svg>
+          </button>
+        </div>
+        <div id="history-list" class="history-list">
+          <p class="sidebar-empty">
+            첫 작업을 시작해 보세요.<br />실행 기록이 여기에 남습니다.
+          </p>
+        </div>
+        <div class="sidebar-bottom">
+          <div class="engine-status">
+            <span class="status-dot" id="server-dot"></span>
+            <div>
+              <strong id="server-status">서버 연결 중</strong
+              ><small>이 컴퓨터에서 실행됩니다</small>
+            </div>
+          </div>
+          <button class="help-button" id="help-button">
+            <svg><use href="#i-help" /></svg>사용 가이드<svg class="small">
+              <use href="#i-chevron" />
+            </svg></button
+          ><span class="version">FRAME STUDIO <span>v1.0</span></span>
+        </div>
+      </aside>
+      <div class="main-shell">
+        <header class="topbar">
+          <div class="breadcrumb">
+            작업공간 <span>/</span> <strong>영상 최적화</strong>
+          </div>
+          <div class="topbar-right">
+            <span class="connection"
+              ><span class="status-dot"></span>로컬 연결</span
+            ><span class="avatar">FS</span>
+          </div>
+        </header>
+        <main>
+          <section class="intro">
+            <div class="eyebrow"><span></span> LESS SIZE. SAME STORY.</div>
+            <h1>화질은 지키고,<br />용량은 <span>가볍게.</span></h1>
+            <p>
+              영상을 선택하고 화질 기준을 설정하세요.<br />기준을 만족하는 작은
+              영상만 저장합니다.
+            </p>
+            <div class="intro-tags">
+              <span>HEVC / H.265</span><span>화질 자동 검증</span
+              ><span>원본 보존</span>
+            </div>
+            <div class="intro-art" aria-hidden="true">
+              <div class="art-label">SMART COMPRESSION <span>↗</span></div>
+              <div class="film">
+                <div class="film-holes"></div>
+                <div class="film-frames">
+                  <div class="landscape l1"><span></span></div>
+                  <div class="landscape l2"><span></span></div>
+                  <div class="landscape l3"><span></span></div>
+                </div>
+                <div class="film-holes"></div>
+              </div>
+              <div class="art-bottom">
+                <div><span class="art-dot"></span>QUALITY PRESERVED</div>
+                <div class="art-bars">
+                  <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i
+                  ><i></i><i></i><i></i>
+                </div>
+              </div>
+            </div>
+          </section>
+          <div class="workspace-grid">
+            <div class="setup-column">
+              <section class="panel source-panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="step-label">01 / SOURCE</span>
+                    <h2>어떤 영상을 최적화할까요?</h2>
+                  </div>
+                  <span class="subtle-pill" id="selection-count"
+                    >선택 없음</span
+                  >
+                </div>
+                <div class="source-empty" id="source-empty">
+                  <div class="source-icon">
+                    <svg><use href="#i-folder" /></svg><span>+</span>
+                  </div>
+                  <h3>영상이 있는 곳을 선택하세요</h3>
+                  <p>MP4 파일 또는 폴더를 선택할 수 있습니다.</p>
+                  <div class="source-buttons">
+                    <button class="button primary" id="choose-files">
+                      <svg><use href="#i-plus" /></svg>파일 선택</button
+                    ><button class="button secondary" id="choose-folder">
+                      <svg><use href="#i-folder" /></svg>폴더 선택
+                    </button>
+                  </div>
+                </div>
+                <div class="selected-source" id="selected-source" hidden>
+                  <div class="selection-toolbar">
+                    <div>
+                      <strong id="selected-label"></strong
+                      ><small id="selected-meta"></small>
+                    </div>
+                    <button
+                      class="button secondary small-button"
+                      id="change-source"
+                    >
+                      다시 선택
+                    </button>
+                  </div>
+                  <div id="selected-files" class="selected-files"></div>
+                </div>
+                <div class="source-footer">
+                  <svg><use href="#i-shield" /></svg
+                  ><span
+                    >업로드 없이, 이 컴퓨터의 원본을 그대로 보존합니다.</span
+                  >
+                </div>
+              </section>
+              <section class="panel settings-panel">
+                <div class="panel-heading">
+                  <div>
+                    <span class="step-label">02 / QUALITY</span>
+                    <h2>지키고 싶은 화질 기준</h2>
+                  </div>
+                  <svg class="heading-icon"><use href="#i-sliders" /></svg>
+                </div>
+                <div class="preset-tabs" role="group" aria-label="화질 프리셋">
+                  <button class="preset active" data-preset="balanced">
+                    균형 잡힌 압축<span>추천</span></button
+                  ><button class="preset" data-preset="high">높은 화질</button
+                  ><button class="preset" data-preset="custom">
+                    직접 설정
+                  </button>
+                </div>
+                <div class="quality-fields">
+                  <label
+                    ><span>PSNR <small>선명도 기준</small></span>
+                    <div class="unit-input">
+                      <input
+                        id="psnr"
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        value="40"
+                        required
+                        aria-describedby="psnr-note"
+                      /><span>dB</span>
+                    </div>
+                    <small id="psnr-note"
+                      >높을수록 원본에 가까운 화질</small
+                    ></label
+                  ><label
+                    ><span>SSIM <small>구조 유사도</small></span>
+                    <div class="unit-input">
+                      <input
+                        id="ssim"
+                        type="number"
+                        min="0"
+                        max="1"
+                        step="0.001"
+                        value="0.93"
+                        required
+                        aria-describedby="ssim-note"
+                      /><span>/ 1</span>
+                    </div>
+                    <small id="ssim-note"
+                      >1에 가까울수록 비슷한 영상</small
+                    ></label
+                  >
+                </div>
+                <label class="encoder-label" for="encoder">인코딩 방식</label
+                ><select id="encoder">
+                  <option value="auto">자동 선택 · GPU 우선, CPU 전환</option>
+                  <option value="cuda">NVIDIA GPU · NVENC</option>
+                  <option value="cpu">CPU · 소프트웨어 인코딩</option>
+                </select>
+                <details class="advanced">
+                  <summary>
+                    고급 설정 <span>비트레이트 재시도 비율</span
+                    ><svg><use href="#i-chevron" /></svg>
+                  </summary>
+                  <label for="ratios">원본 비트레이트 대비 비율</label
+                  ><input
+                    id="ratios"
+                    value="0.6, 0.7, 0.8, 0.9"
+                    autocomplete="off"
+                  />
+                  <p>
+                    0과 1 사이의 값을 오름차순으로 입력하세요. 화질이 부족하면
+                    다음 비율로 다시 인코딩합니다.
+                  </p>
+                </details>
+                <div class="run-row">
+                  <div>
+                    <svg><use href="#i-check" /></svg
+                    ><span>화질과 용량을 모두 검증</span>
+                  </div>
+                  <button class="button run-button" id="start-job" disabled>
+                    트랜스코딩 시작<svg><use href="#i-arrow" /></svg>
+                  </button>
+                </div>
+              </section>
+            </div>
+            <aside class="monitor-column">
+              <section class="monitor" aria-live="polite">
+                <div class="monitor-header">
+                  <span class="monitor-label"
+                    ><span class="status-dot"></span> LIVE WORKSPACE</span
+                  ><span class="monitor-state" id="monitor-state">준비</span>
+                </div>
+                <div class="monitor-id" id="monitor-id">YOUR NEXT FRAME</div>
+                <h2 id="monitor-title">
+                  작은 용량으로,<br />다음 장면을 준비하세요.
+                </h2>
+                <p id="monitor-description">
+                  작업을 시작하면 진행 상황과<br />화질 검사 결과를 여기서
+                  확인할 수 있어요.
+                </p>
+                <div
+                  class="monitor-orbit"
+                  id="monitor-orbit"
+                  aria-hidden="true"
+                >
+                  <div></div>
+                  <div></div>
+                  <span
+                    ><svg><use href="#i-frame" /></svg></span
+                  ><i></i>
+                </div>
+                <div class="live-progress" id="live-progress" hidden>
+                  <div class="progress-meta">
+                    <span id="progress-label">영상 분석 중</span
+                    ><strong id="progress-count">0 / 0</strong>
+                  </div>
+                  <div class="progress-track">
+                    <div id="progress-fill"></div>
+                  </div>
+                  <p id="current-file"></p>
+                  <div class="attempt-row">
+                    <span id="attempt-label"></span
+                    ><span id="elapsed-time">00:00</span>
+                  </div>
+                </div>
+                <div class="pipeline">
+                  <div id="stage-analyzing"><span>1</span>분석</div>
+                  <i></i>
+                  <div id="stage-encoding"><span>2</span>인코딩</div>
+                  <i></i>
+                  <div id="stage-measuring"><span>3</span>검증</div>
+                </div>
+                <div class="live-metrics">
+                  <div>
+                    <span>PSNR <small>dB</small></span
+                    ><strong id="live-psnr">—</strong>
+                  </div>
+                  <div><span>SSIM</span><strong id="live-ssim">—</strong></div>
+                </div>
+                <div class="monitor-foot">
+                  <svg><use href="#i-shield" /></svg>기준 미달 영상은 원본을
+                  유지합니다.
+                </div>
+              </section>
+              <section class="quality-note">
+                <div class="note-icon">
+                  <svg><use href="#i-shield" /></svg>
+                </div>
+                <div>
+                  <h3>더 작은 영상, 같은 이야기.</h3>
+                  <p>
+                    PSNR과 SSIM을 모두 통과하고<br />실제 비트레이트와 파일
+                    크기가<br />줄어든 결과만 채택합니다.
+                  </p>
+                </div>
+              </section>
+            </aside>
+          </div>
+          <section class="results-section" id="results-section">
+            <div class="results-heading">
+              <div>
+                <span class="step-label">03 / RESULTS</span>
+                <h2>한눈에 보는 실행 결과</h2>
+                <p id="results-caption">
+                  작업이 끝나면 영상별 화질과 압축 결과를 확인할 수 있습니다.
+                </p>
+              </div>
+              <div class="report-actions" id="report-actions" hidden>
+                <a class="button secondary small-button" id="download-csv"
+                  ><svg><use href="#i-download" /></svg>CSV</a
+                ><a class="button secondary small-button" id="download-json"
+                  >JSON</a
+                >
+              </div>
+            </div>
+            <div class="history-toolbar">
+              <label for="history-select">실행 기록</label
+              ><select id="history-select" disabled>
+                <option>아직 실행 기록이 없습니다</option>
+              </select>
+              <div class="history-actions">
+                <button
+                  class="button secondary small-button"
+                  id="delete-history"
+                  disabled
+                >
+                  선택 기록 삭제
+                </button>
+                <button
+                  class="button secondary small-button"
+                  id="clear-history"
+                  disabled
+                >
+                  완료 기록 전체 삭제
+                </button>
+              </div>
+            </div>
+            <div class="result-summary">
+              <div class="summary-card">
+                <span>채택한 영상</span
+                ><strong id="summary-accepted">—<small>개</small></strong>
+                <p>화질 · 용량 기준 모두 통과</p>
+              </div>
+              <div class="summary-card">
+                <span>원본 유지</span
+                ><strong id="summary-unchanged">—<small>개</small></strong>
+                <p>화질 기준에 맞는 결과 없음</p>
+              </div>
+              <div class="summary-card">
+                <span>절감 가능한 용량</span
+                ><strong id="summary-saved">—</strong>
+                <p id="summary-saved-note">채택한 결과 기준 · 원본은 보존</p>
+              </div>
+              <div class="summary-card">
+                <span>평균 용량 감소율</span
+                ><strong class="accent-number" id="summary-percent"
+                  >—<small>%</small></strong
+                >
+                <p>채택한 영상의 전체 크기 기준</p>
+              </div>
+            </div>
+            <div class="results-empty" id="results-empty">
+              <svg><use href="#i-video" /></svg
+              ><strong>아직 실행 결과가 없습니다</strong
+              ><span>첫 영상을 선택하고 최적화를 시작해 보세요.</span>
+            </div>
+            <div class="results-table-wrap" id="results-table-wrap" hidden>
+              <table>
+                <thead>
+                  <tr>
+                    <th>영상</th>
+                    <th>결과</th>
+                    <th>PSNR / SSIM</th>
+                    <th>원본 → 결과</th>
+                    <th>감소율</th>
+                    <th><span class="sr-only">다운로드</span></th>
+                  </tr>
+                </thead>
+                <tbody id="results-body"></tbody>
+              </table>
+            </div>
+            <div class="job-error" id="job-error" hidden role="alert"></div>
+            <details class="execution-log" id="execution-log" hidden>
+              <summary>실행 로그<span id="log-count"></span></summary>
+              <pre id="log-content"></pre>
+            </details>
+          </section>
+          <footer class="page-footer">
+            <span>FRAME STUDIO</span>
+            <p>원본을 지키는, 더 똑똑한 영상 최적화.</p>
+            <span>MADE FOR YOUR NEXT FRAME ↗</span>
+          </footer>
+        </main>
+      </div>
+    </div>
+    <dialog id="file-dialog" class="file-dialog">
+      <div class="dialog-heading">
+        <div>
+          <span class="step-label">SOURCE EXPLORER</span>
+          <h2 id="picker-title">영상 파일 선택</h2>
+        </div>
+        <button
+          class="icon-button"
+          id="close-picker"
+          aria-label="파일 탐색기 닫기"
+        >
+          <svg><use href="#i-close" /></svg>
+        </button>
+      </div>
+      <p class="dialog-description">
+        웹서버가 실행 중인 이 컴퓨터에서 선택합니다.
+      </p>
+      <div class="explorer-toolbar">
+        <select id="locations" aria-label="빠른 위치 선택"></select
+        ><button class="icon-button" id="parent-folder" aria-label="상위 폴더">
+          <svg><use href="#i-up" /></svg>
+        </button>
+        <form id="path-form">
+          <input
+            id="browse-path"
+            placeholder="폴더 경로 입력"
+            aria-label="폴더 경로"
+          /><button class="icon-button" aria-label="폴더로 이동">
+            <svg><use href="#i-arrow" /></svg>
+          </button>
+        </form>
+      </div>
+      <div class="explorer-head"><span>이름</span><span>크기</span></div>
+      <div id="browse-entries" class="browse-entries"></div>
+      <p id="browse-message" class="browse-message" role="status"></p>
+      <div class="dialog-footer">
+        <label class="recursive-option"
+          ><input type="checkbox" id="recursive" /><span
+            >하위 폴더 포함</span
+          ></label
+        ><span id="picker-selection-count">선택한 파일 없음</span
+        ><button class="button primary" id="confirm-selection">
+          선택 완료<svg><use href="#i-check" /></svg>
+        </button>
+      </div>
+    </dialog>
+    <dialog id="help-dialog" class="help-dialog">
+      <div class="dialog-heading">
+        <h2>Frame Studio 사용 가이드</h2>
+        <button class="icon-button" id="close-help" aria-label="가이드 닫기">
+          <svg><use href="#i-close" /></svg>
+        </button>
+      </div>
+      <ol>
+        <li>
+          <strong>영상 선택</strong>
+          <p>
+            파일을 여러 개 선택하거나 폴더를 선택하세요. 하위 폴더 포함 여부도
+            설정할 수 있습니다.
+          </p>
+        </li>
+        <li>
+          <strong>화질 설정</strong>
+          <p>
+            균형 프리셋은 PSNR 40 dB·SSIM 0.93, 높은 화질은 42 dB·0.95입니다.
+            전체 평균과 Y 채널이 모두 기준을 만족해야 합니다.
+          </p>
+        </li>
+        <li>
+          <strong>실행과 결과</strong>
+          <p>
+            지정한 비트레이트 비율을 낮은 순서로 시도합니다. 결과는 별도 작업
+            폴더에 저장하고, 영상·CSV·JSON을 다운로드할 수 있습니다. 브라우저를
+            닫아도 서버가 켜져 있으면 작업은 계속됩니다.
+          </p>
+        </li>
+      </ol>
+      <p class="help-note">
+        전체 평균 기준이며 장면별 최저 화질을 보장하지 않습니다. Dolby
+        Vision·동적 HDR은 지원하지 않습니다. 한 번에 하나의 작업을 실행합니다.
+      </p>
+    </dialog>
+    <dialog
+      id="delete-dialog"
+      class="help-dialog"
+      aria-labelledby="delete-title"
+      aria-describedby="delete-description"
+    >
+      <div class="dialog-heading">
+        <h2 id="delete-title">실행 기록 삭제</h2>
+        <button class="icon-button" id="close-delete" aria-label="삭제 창 닫기">
+          <svg><use href="#i-close" /></svg>
+        </button>
+      </div>
+      <p id="delete-description" class="delete-description"></p>
+      <p class="help-note">
+        원본 영상과 결과 영상·보고서는 그대로 보존됩니다. 삭제한 기록은
+        웹페이지에서 다시 조회하거나 다운로드할 수 없습니다.
+      </p>
+      <p class="delete-location">
+        결과 파일 보관 위치<span id="delete-location"></span>
+      </p>
+      <div class="delete-actions">
+        <button class="button secondary" id="cancel-delete" autofocus>
+          취소
+        </button>
+        <button class="button danger" id="confirm-delete">기록 삭제</button>
+      </div>
+      <p id="delete-error" class="job-error" role="alert" hidden></p>
+    </dialog>
+    <div id="toast" class="toast" role="status" hidden></div>
+  </body>
+</html>

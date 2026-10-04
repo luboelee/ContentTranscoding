@@ -1,1 +1,5 @@
 TranscodingContents.code-workspace
+.vscode/
+__pycache__/
+sample/
+.web-data/
