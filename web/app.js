@@ -543,7 +543,11 @@ function renderJob() {
             ] || "확인 필요";
       const bitrate = (value) =>
         typeof value === "number" ? (value / 1e6).toFixed(2) + " Mbps" : "—";
-      return `<tr><td><strong>${escapeHtml(record.file_name)}</strong><small title="${escapeHtml(record.source_path)}">${escapeHtml(record.source_path)}</small>${record.reason ? `<small>${escapeHtml(record.reason)}</small>` : ""}</td><td><span class="result-badge ${escapeHtml(record.status)}">${label}</span></td><td class="metric-value">${metric(record.psnr_avg, 2)} dB<small>Y ${metric(record.psnr_y, 2)} dB · ${record.attempts || 0}회 시도</small><small>SSIM ${metric(record.ssim_all, 4)} / Y ${metric(record.ssim_y, 4)}</small></td><td class="metric-value">${bytes(record.orig_file_size)}<small>→ ${accepted ? bytes(record.trans_file_size) : "원본 유지"}</small><small>${bitrate(record.orig_video_bitrate)}${accepted ? " → " + bitrate(record.trans_video_bitrate) : ""}</small></td><td class="metric-value">${reduction}</td><td>${record.download_url ? `<a class="download-link" href="${escapeHtml(record.download_url)}" aria-label="${escapeHtml(record.file_name)} 다운로드">${icon("download")}</a>` : ""}</td></tr>`;
+      const notes = [record.reason, record.warnings]
+        .filter(Boolean)
+        .map((note) => `<small>${escapeHtml(note)}</small>`)
+        .join("");
+      return `<tr><td><strong>${escapeHtml(record.file_name)}</strong><small title="${escapeHtml(record.source_path)}">${escapeHtml(record.source_path)}</small>${notes}</td><td><span class="result-badge ${escapeHtml(record.status)}">${label}</span></td><td class="metric-value">${metric(record.psnr_avg, 2)} dB<small>Y ${metric(record.psnr_y, 2)} dB · ${record.attempts || 0}회 시도</small><small>SSIM ${metric(record.ssim_all, 4)} / Y ${metric(record.ssim_y, 4)}</small></td><td class="metric-value">${bytes(record.orig_file_size)}<small>→ ${accepted ? bytes(record.trans_file_size) : "원본 유지"}</small><small>${bitrate(record.orig_video_bitrate)}${accepted ? " → " + bitrate(record.trans_video_bitrate) : ""}</small></td><td class="metric-value">${reduction}</td><td>${record.download_url ? `<a class="download-link" href="${escapeHtml(record.download_url)}" aria-label="${escapeHtml(record.file_name)} 다운로드">${icon("download")}</a>` : ""}</td></tr>`;
     })
     .join("");
   $("report-actions").hidden = !job.reports?.csv && !job.reports?.json;

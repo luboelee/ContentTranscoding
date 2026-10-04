@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -150,6 +151,42 @@ class ContentTranscodingTestCase(unittest.TestCase):
         self.assertTrue(QualityMetrics(40, 40, 0.93, 0.93).meets(40, 0.93))
         self.assertFalse(QualityMetrics(39.9999, 41, 0.94, 0.94).meets(40, 0.93))
         self.assertFalse(QualityMetrics(41, 41, 0.9299999, 0.94).meets(40, 0.93))
+
+    def test_compatibility_allows_only_data_stream_removal(self):
+        source = VideoInfo(1000, 320, 240, "yuv420p", 2, 1, ("video", "audio", "data", "video", "subtitle"))
+        output = replace(source, bitrate=600, stream_types=("video", "audio", "video", "subtitle"))
+        self.assertTrue(self.transcoder._compatible(source, output))
+        for types in (("video", "video", "subtitle"), ("video", "audio", "subtitle"),
+                      ("video", "audio", "video"), ("video", "audio", "data", "video", "subtitle")):
+            with self.subTest(types=types):
+                self.assertFalse(self.transcoder._compatible(source, replace(output, stream_types=types)))
+        self.assertFalse(self.transcoder._compatible(source, replace(output, frames=1)))
+        self.assertFalse(self.transcoder._compatible(source, replace(output, pixel_format="yuv420p10le")))
+
+    def test_excluded_camera_data_is_reported_without_reducing_quality_checks(self):
+        source = self.target_path / "camera.mp4"
+        source.write_bytes(b"original video")
+        candidate = self.transcoder.temp_path / source.name
+        candidate.write_bytes(b"small")
+        source_info = VideoInfo(1000, 320, 240, "yuv420p", 2, 1, ("video", "audio", "data", "data"),
+                                excluded_streams=("#2 (djmd)", "#3 (tmcd)"))
+        output_info = replace(source_info, bitrate=600, stream_types=("video", "audio"), excluded_streams=())
+        with (
+            patch.object(self.transcoder, "_get_video_info", side_effect=[source_info, output_info]),
+            patch.object(self.transcoder, "_transcode", return_value=candidate),
+            patch.object(self.transcoder, "_measure", return_value=self.transcoder._metric_report_paths(candidate)),
+            patch.object(self.transcoder, "_parse_metrics", return_value=QualityMetrics(41, 41, 0.94, 0.94)),
+            redirect_stdout(io.StringIO()),
+        ):
+            record = self.transcoder._process_file(source, 1, 1)
+            self.assertEqual(record["status"], "accepted")
+            self.assertIn("djmd", record["warnings"])
+            self.assertIn("tmcd", record["warnings"])
+            self.transcoder._results = [record]
+            self.assertTrue(self.transcoder._gather_measured_data())
+        reported = json.loads((self.transcoder.done_path / "measured_data.json").read_text(encoding="utf-8"))[0]
+        self.assertEqual(reported["warnings"], record["warnings"])
+        self.assertEqual(source.read_bytes(), b"original video")
 
     def test_lossless_frame_does_not_hide_low_quality_frame(self):
         report = self.transcoder.temp_path / "psnr.txt"

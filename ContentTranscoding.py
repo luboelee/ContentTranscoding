@@ -23,7 +23,7 @@ COMPRESS_RATIOS = (0.6, 0.7, 0.8, 0.9)
 RESULT_COLUMNS = (
     "file_name", "status", "reason", "psnr_avg", "psnr_y", "ssim_all", "ssim_y",
     "orig_file_size", "trans_file_size", "ratio", "orig_video_bitrate",
-    "target_video_bitrate", "trans_video_bitrate", "attempts",
+    "target_video_bitrate", "trans_video_bitrate", "attempts", "warnings",
 )
 
 
@@ -61,6 +61,7 @@ class VideoInfo:
     stream_types: tuple[str, ...]
     video_properties: tuple[tuple[str, str], ...] = ()
     hdr_metadata: tuple[str, ...] = ()
+    excluded_streams: tuple[str, ...] = ()
 
 
 class ContentTranscoding:
@@ -121,11 +122,13 @@ class ContentTranscoding:
         command = [
             FFMPEG, "-nostdin", "-y", "-v", "error", "-xerror",
             "-noautorotate", "-i", str(target_file),
-            "-map", "0", "-map_metadata", "0", "-map_chapters", "0", "-c", "copy",
+            # Camera telemetry and timecode data cannot always be muxed back to MP4.
+            # Keep every video (including covers), audio and subtitle stream.
+            "-map", "0", "-map", "-0:d", "-map_metadata", "0", "-map_chapters", "0", "-c", "copy",
             "-c:v:0", "hevc_nvenc" if self.use_cuda else "libx265",
             "-b:v:0", str(video_bitrate), "-preset:v:0", "p5" if self.use_cuda else "medium",
             "-fps_mode:v:0", "passthrough", "-enc_time_base:v:0", "demux",
-            "-tag:v:0", "hvc1", "-movflags", "+faststart",
+            "-tag:v:0", "hvc1", "-movflags", "+faststart", "-write_tmcd", "0",
         ]
         if self.use_cuda:
             command.extend(("-rc:v:0", "vbr", "-multipass:v:0", "fullres"))
@@ -389,6 +392,8 @@ class ContentTranscoding:
             stream["pix_fmt"], frames, duration, tuple(s.get("codec_type", "unknown") for s in streams),
             tuple(sorted(properties.items())),
             tuple(sorted(hdr_metadata)),
+            tuple(f"#{s.get('index', index)} ({s.get('codec_tag_string') or s.get('codec_name') or 'data'})"
+                  for index, s in enumerate(streams) if s.get("codec_type") == "data"),
         )
 
     @staticmethod
@@ -396,7 +401,8 @@ class ContentTranscoding:
         return (
             source.width == candidate.width and source.height == candidate.height
             and source.pixel_format == candidate.pixel_format
-            and source.frames == candidate.frames and source.stream_types == candidate.stream_types
+            and source.frames == candidate.frames
+            and tuple(kind for kind in source.stream_types if kind != "data") == candidate.stream_types
             and abs(source.duration - candidate.duration) <= max(0.01, source.duration / source.frames)
             and all(dict(candidate.video_properties).get(key) == value
                     for key, value in source.video_properties)
@@ -411,7 +417,7 @@ class ContentTranscoding:
 
     def _process_file(self, target_file: Path, position: int, total: int) -> dict[str, object]:
         record: dict[str, object] = dict.fromkeys(RESULT_COLUMNS)
-        record.update(file_name=target_file.name, status="failed", reason="", attempts=0)
+        record.update(file_name=target_file.name, status="failed", reason="", attempts=0, warnings="")
         try:
             source_stat = target_file.stat()
             record["orig_file_size"] = source_stat.st_size
@@ -428,6 +434,12 @@ class ContentTranscoding:
             record["reason"] = self._error_text(error)
             return record
         record["orig_video_bitrate"] = source.bitrate
+        if source.excluded_streams:
+            record["warnings"] = (
+                "결과에서 부가 데이터·타임코드 트랙 제외: " + ", ".join(source.excluded_streams)
+                + ". 원본 파일에는 그대로 보존됩니다."
+            )
+            print(f"[Metadata] {record['warnings']}")
         had_error = False
         last_error = ""
         for attempt, ratio in enumerate(self.ratios, start=1):
@@ -579,7 +591,7 @@ class ContentTranscoding:
             self._remove_files(created)
             print(f"[Error] Failed to save measured data: {error}")
             return False
-        print(f"[Success] Saved measured data to {csv_path} and {json_path}")
+        print(f"[Report] Saved measured data to {csv_path} and {json_path}")
         return True
 
     def run(self, target_files: Sequence[Path] | None = None) -> bool:

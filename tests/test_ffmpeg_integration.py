@@ -78,6 +78,51 @@ class FFmpegIntegrationTests(unittest.TestCase):
         self.assertEqual(metrics.psnr_avg, math.inf)
         self.assertEqual(metrics.ssim_all, 1.0)
 
+    def test_camera_data_and_timecode_exclusion_preserves_audio_and_cover(self):
+        base = self.root / "timecode-base.mp4"
+        cover = self.root / "cover.jpg"
+        camera = self.root / "camera.mp4"
+        subprocess.run([
+            "ffmpeg", "-nostdin", "-v", "error", "-i", str(self.source),
+            "-map", "0", "-c", "copy", "-timecode", "02:41:34:10", str(base),
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        subprocess.run([
+            "ffmpeg", "-nostdin", "-v", "error", "-f", "lavfi", "-i", "color=c=red:size=160x90",
+            "-frames:v", "1", "-update", "1", str(cover),
+        ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        preparation = subprocess.run([
+            "ffmpeg", "-nostdin", "-v", "error", "-i", str(base), "-i", str(cover),
+            "-map", "0", "-map", "-0:d", "-map", "1:v", "-c", "copy",
+            "-disposition:v:1", "attached_pic", "-timecode", "02:41:34:10", "-write_tmcd", "1", str(camera),
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.assertEqual(preparation.returncode, 0, preparation.stderr.decode(errors="replace"))
+        camera_bytes = camera.read_bytes()
+        for tag in ("tmcd", "djmd"):
+            with self.subTest(tag=tag):
+                # Camera manufacturers use private sample-entry tags that FFmpeg
+                # reads as codec none. Change only the tiny generated fixture.
+                selected = self.root / f"camera-{tag}.mp4"
+                selected.write_bytes(camera_bytes.replace(b"tmcd", tag.encode("ascii")))
+                original_hash = hashlib.sha256(selected.read_bytes()).digest()
+                source_probe = self.transcoder._probe(selected)
+                data = [s for s in source_probe["streams"] if s["codec_type"] == "data"]
+                self.assertGreaterEqual(len(data), 1)
+                self.assertTrue(all(stream["codec_tag_string"] == tag for stream in data))
+                with redirect_stdout(io.StringIO()) as log:
+                    self.assertTrue(self.transcoder.run([selected]), log.getvalue())
+                output = self.root / "done" / selected.name
+                self.assertTrue(output.is_file(), log.getvalue())
+                self.assertEqual(hashlib.sha256(selected.read_bytes()).digest(), original_hash)
+                self.assertEqual(self.audio_hashes(selected), self.audio_hashes(output))
+                output_probe = self.transcoder._probe(output)
+                self.assertEqual([s["codec_type"] for s in output_probe["streams"]], ["video", "audio", "audio", "video"])
+                self.assertEqual(output_probe["streams"][-1]["disposition"]["attached_pic"], 1)
+                record = self.transcoder._results[0]
+                self.assertEqual(record["status"], "accepted")
+                self.assertIn(tag, record["warnings"])
+                self.assertGreaterEqual(record["psnr_avg"], 40)
+                self.assertGreaterEqual(record["ssim_all"], 0.93)
+
     def test_default_auto_encoder_produces_acceptable_result(self):
         self.transcoder.encoder_mode = "auto"
         self.transcoder.use_cuda = True
